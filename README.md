@@ -1,14 +1,42 @@
-# Analisador de Rede v2.0
+# Analisador de Rede v2.2
 
 ## Descrição
-Analisador de Rede é uma ferramenta completa para descoberta e monitoramento de dispositivos em redes locais. Realiza varredura ARP, identifica fabricantes via OUI database, executa medições de latência (ping) contínuas e fornece interface gráfica em tempo real.
+Analisador de Rede é uma ferramenta completa para descoberta e monitoramento de dispositivos em redes locais. Realiza varredura ARP, identifica fabricantes via OUI database, executa medições de latência (ping) contínuas, descobre serviços por port scanning e fornece interface gráfica avançada em tempo real.
 
 **Desenvolvido para**: Windows (recomendado com privilégios administrativos)  
 **Linguagem**: Python 3.10+  
 **Interface**: Tkinter (GUI nativa)  
-**Versão**: 2.0 (Janeiro 2026)
+**Versão**: 2.2 (Janeiro 2026)
 
----
+## Como Iniciar (v2.2)
+
+### Opção 1: PowerShell (Recomendado)
+```powershell
+.\iniciar.ps1
+```
+
+### Opção 2: Command Prompt
+```cmd
+iniciar.bat
+```
+
+### Opção 3: Manual
+```powershell
+.venv\Scripts\python.exe run.py
+```
+
+## Novas Features v2.2
+
+### 1. Copiar Textos (Ctrl+C)
+Selecione uma linha e pressione Ctrl+C para copiar todos os dados
+
+### 2. Renomear Dispositivos
+Duplo-clique na coluna MAC para dar um apelido persistente (salvo em config.json)
+
+### 3. Abrir Portas
+Clique direito na coluna SERVIÇOS para abrir serviços descobertos no navegador/aplicação
+
+## Instalação de Dependências---
 
 ## Funcionalidades Principais
 

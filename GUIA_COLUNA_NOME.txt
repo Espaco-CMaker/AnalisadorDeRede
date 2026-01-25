@@ -1,0 +1,256 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║              ANALISADOR DE REDE v2.3 - COLUNA "NOME" EDITÁVEL             ║
+║         Renomear Dispositivos Inline com Persistência em config.json      ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+DATA: 25 de Janeiro de 2026
+VERSÃO: 2.3 (Nova Feature: Coluna Nome Editável)
+
+═══════════════════════════════════════════════════════════════════════════
+COMO USAR A COLUNA "NOME"
+═══════════════════════════════════════════════════════════════════════════
+
+PASSO 1: Localize a coluna "Nome [Editar]"
+──────────────────────────────────────────
+Na tabela principal, você verá uma nova coluna "Nome [Editar]" 
+entre MAC e Hostname
+
+PASSO 2: Duplo-clique na célula
+────────────────────────────────
+Faça duplo-clique em qualquer célula da coluna "Nome [Editar]"
+
+Uma janela de edição aparecerá mostrando:
+  ┌────────────────────────────────────┐
+  │ Editar Nome do Dispositivo         │
+  ├────────────────────────────────────┤
+  │ Dispositivo: 192.168.1.1           │
+  │ MAC: AA:BB:CC:DD:EE:FF             │
+  │                                    │
+  │ Novo nome: [______________]        │
+  │                                    │
+  │ [Salvar]  [Cancelar]              │
+  └────────────────────────────────────┘
+
+PASSO 3: Digite um nome
+───────────────────────
+Digite um nome descritivo para o dispositivo:
+  "Router Principal"
+  "Impressora HP"
+  "Celular João"
+  "Servidor SSH"
+  etc.
+
+PASSO 4: Salvar
+───────────────
+Clique no botão "Salvar" ou pressione Enter
+
+A janela fecha e o nome aparece na coluna "Nome [Editar]"
+
+═══════════════════════════════════════════════════════════════════════════
+ESTRUTURA DA TABELA (Coluna 4)
+═══════════════════════════════════════════════════════════════════════════
+
+Exemplo de como a tabela fica com nomes editados:
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ # │ IP          │ MAC              │ Nome [Editar]    │ Hostname        │
+├──────────────────────────────────────────────────────────────────────────┤
+│ 1 │192.168.1.1  │AA:BB:CC:DD:EE:FF │Router Principal  │router.local     │
+│ 2 │192.168.1.50 │11:22:33:44:55:66 │Impressora HP     │impressora.local │
+│ 3 │192.168.1.100│99:88:77:66:55:44 │Celular João      │celular-joao     │
+│ 4 │192.168.1.200│FF:EE:DD:CC:BB:AA │(vazio)           │device200.local  │
+└──────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════
+CARACTERÍSTICAS
+═══════════════════════════════════════════════════════════════════════════
+
+✓ EDITÁVEL INLINE
+  Duplo-clique diretamente na coluna para editar
+
+✓ PERSISTENTE
+  Os nomes são salvos automaticamente em config.json
+  Aparecem toda vez que você inicia a aplicação
+
+✓ VINCULADO AO MAC
+  Cada dispositivo é identificado unicamente pelo MAC
+  Se o IP mudar, o nome permanece vinculado
+
+✓ MODAL
+  A janela de edição é modal (bloqueia a interface até fechar)
+
+✓ ATALHOS
+  Enter → Salva
+  Escape → Cancela
+
+═══════════════════════════════════════════════════════════════════════════
+ARQUIVO DE CONFIGURAÇÃO (config.json)
+═══════════════════════════════════════════════════════════════════════════
+
+Os nomes são salvos em config.json com a estrutura:
+
+{
+  "ping_attempts": 4,
+  "scan_interval": 60,
+  "device_nicknames": {
+    "AA:BB:CC:DD:EE:FF": "Router Principal",
+    "11:22:33:44:55:66": "Impressora HP",
+    "99:88:77:66:55:44": "Celular João",
+    "FF:EE:DD:CC:BB:AA": "Servidor SSH"
+  }
+}
+
+═══════════════════════════════════════════════════════════════════════════
+REMOVENDO UM NOME
+═══════════════════════════════════════════════════════════════════════════
+
+OPÇÃO 1: Deixar em branco
+─────────────────────────
+1. Duplo-clique na coluna "Nome [Editar]"
+2. Limpe o campo (selecionar tudo com Ctrl+A, depois Delete)
+3. Clique "Salvar"
+4. O nome é removido da tabela e de config.json
+
+OPÇÃO 2: Editar config.json manualmente
+────────────────────────────────────────
+Abra config.json e remova a linha:
+  "AA:BB:CC:DD:EE:FF": "Router Principal",
+
+═══════════════════════════════════════════════════════════════════════════
+EXEMPLOS DE USO
+═══════════════════════════════════════════════════════════════════════════
+
+CENÁRIO 1: Primeira execução
+────────────────────────────
+1. Aplicação inicia
+2. ARP scan descobre dispositivos
+3. Coluna "Nome [Editar]" está vazia
+4. Você renomeia os dispositivos conhecidos
+5. Ao fechar e reabrir, os nomes aparecem automaticamente
+
+CENÁRIO 2: Novo dispositivo descoberto
+───────────────────────────────────────
+1. Um novo IP aparece na tabela
+2. Coluna "Nome [Editar]" vazia
+3. Você duplo-clica e atribui um nome
+4. Nome é salvo em config.json
+5. Próximas vezes que esse MAC aparecer, o nome já está lá
+
+CENÁRIO 3: Mesmo dispositivo com IP diferente
+──────────────────────────────────────────────
+1. Seu router tem IP 192.168.1.1 com MAC AA:BB:CC:DD:EE:FF
+2. Você o nomeou "Router Principal"
+3. Semanas depois, o IP muda para 192.168.1.2
+4. O mesmo MAC aparece mas com novo IP
+5. O nome "Router Principal" continua vinculado ao MAC!
+
+═══════════════════════════════════════════════════════════════════════════
+DICAS E BOAS PRÁTICAS
+═══════════════════════════════════════════════════════════════════════════
+
+NOMES DESCRITIVOS
+├ "Router VIVO 5G"
+├ "Impressora HP LaserJet"
+├ "Celular Samsung S21"
+├ "Câmera IP Hikvision"
+└ "Servidor NAS Synology"
+
+NOMES GENÉRICOS (Evitar)
+├ "Device 1"
+├ "Router"
+├ "Unknown"
+└ "PC"
+
+COMPRIMENTO
+├ Máximo recomendado: 30 caracteres
+├ Mínimo para estar útil: 3 caracteres
+└ Unicode suportado (acentos, caracteres especiais)
+
+ORGANIZAÇÃO
+├ Prefixo por tipo: "ROUTER:", "PRINTER:", "PHONE:"
+├ Sufixo com localização: "Router - Sala", "Printer - Office"
+└ Nomes consistentes entre ambientes
+
+═══════════════════════════════════════════════════════════════════════════
+TABELA DE COMPARAÇÃO - ANTES vs DEPOIS (v2.3)
+═══════════════════════════════════════════════════════════════════════════
+
+Antes (sem coluna Nome):
+┌────────────────────────────────────────┐
+│ IP         │ MAC              │ Host   │
+├────────────────────────────────────────┤
+│192.168.1.1 │AA:BB:CC:DD:EE:FF │router. │
+│192.168.1.50│11:22:33:44:55:66 │device. │
+└────────────────────────────────────────┘
+❌ Confuso qual é qual?
+
+Depois (com coluna Nome - v2.3):
+┌──────────────────────────────────────────────┐
+│ IP         │ MAC              │ Nome       │
+├──────────────────────────────────────────────┤
+│192.168.1.1 │AA:BB:CC:DD:EE:FF │Router     │
+│192.168.1.50│11:22:33:44:55:66 │Impressora │
+└──────────────────────────────────────────────┘
+✓ Claro e organizado!
+
+═══════════════════════════════════════════════════════════════════════════
+ATALHOS RÁPIDOS
+═══════════════════════════════════════════════════════════════════════════
+
+Ação                        │ Atalho
+────────────────────────────┼──────────────────
+Editar nome                 │ Duplo-clique na coluna "Nome"
+Salvar                      │ Enter
+Cancelar edição             │ Escape
+Copiar linha inteira        │ Selecionar + Ctrl+C
+Ver histórico              │ Abrir arquivo config.json
+
+═══════════════════════════════════════════════════════════════════════════
+SOLUÇÃO DE PROBLEMAS
+═══════════════════════════════════════════════════════════════════════════
+
+Problema: "Nome não está aparecendo"
+Solução:
+  1. Verifique se config.json existe
+  2. Certifique-se que o MAC está correto
+  3. Reinicie a aplicação
+
+Problema: "Não consigo editar a coluna"
+Solução:
+  1. Faça DUPLO-CLIQUE (não simples)
+  2. Clique especificamente na coluna "Nome [Editar]"
+  3. Certifique-se que não está em outra coluna
+
+Problema: "Mudei o nome mas não salvou"
+Solução:
+  1. Você clicou "Salvar"? (não apenas "Enter")
+  2. Verifique em config.json se foi salvo
+  3. Tente novamente
+
+Problema: "Erro ao salvar em config.json"
+Solução:
+  1. Verifique se o arquivo tem permissão de escrita
+  2. Execute como administrador
+  3. Mude as permissões da pasta do projeto
+
+═══════════════════════════════════════════════════════════════════════════
+INTEGRAÇÃO COM OUTRAS FEATURES
+═══════════════════════════════════════════════════════════════════════════
+
+✓ Compatível com cópia de dados (Ctrl+C)
+  O nome editável é copiado junto com os outros dados
+
+✓ Compatível com renomeação via config.json
+  Se editar config.json manualmente, a tabela recarrega
+
+✓ Compatível com tabelas ordenadas
+  Os nomes aparecem no lugar certo após ordenação
+
+✓ Compatível com persistência de apelidos antigos
+  Migração automática do sistema antigo
+
+═══════════════════════════════════════════════════════════════════════════
+VERSÃO: 2.3
+DATA: Janeiro 2026
+DESENVOLVIDO PARA: CMaker Projects
+═══════════════════════════════════════════════════════════════════════════

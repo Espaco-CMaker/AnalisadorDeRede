@@ -1,0 +1,240 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                    GUIA DE USO - PORTAS CLICÁVEIS v2.1                    ║
+║              Descobrir e Abrir Serviços de Dispositivos de Rede            ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════
+1. INICIANDO A APLICAÇÃO
+═══════════════════════════════════════════════════════════════════════════
+
+No terminal, navegue até o diretório do projeto:
+
+  cd "D:\+Espaço CMaker\Projetos\#2026\AnalisadorDeRede"
+
+Execute:
+
+  .venv\Scripts\python.exe analisador_rede_gui.py
+
+A janela da aplicação aparecerá em segundos com 3 abas:
+• Dispositivos (com tabela e gráfico)
+• Configurações (ajustes de scan)
+• Logs (histórico de eventos)
+
+═══════════════════════════════════════════════════════════════════════════
+2. DESCOBRIR DISPOSITIVOS NA REDE
+═══════════════════════════════════════════════════════════════════════════
+
+A aplicação inicia um scan automático ao abrir. Você verá:
+
+✓ Linha amarela = Dispositivo sendo atualizado
+✓ IPs e MACs são descobertos via ARP scan
+✓ Hostnames são resolvidos via DNS
+✓ NetBIOS descobre nomes Windows
+✓ Portas abertas são detectadas em paralelo
+
+A tabela terá estas colunas:
+
+  # | IP | MAC | Hostname | NetBIOS | Fabricante | SERVIÇOS | Ping | Gráfico | Histórico
+
+═══════════════════════════════════════════════════════════════════════════
+3. ABRINDO PORTAS (NOVO EM v2.1)
+═══════════════════════════════════════════════════════════════════════════
+
+PASSO 1: Localize a coluna "SERVIÇOS"
+───────────────────────────────────────
+A coluna "SERVIÇOS" mostra portas descobertas no formato:
+  
+  "SSH(22), HTTP(80), MySQL(3306)"
+
+PASSO 2: Clique Direito na Coluna
+───────────────────────────────────
+Clique com o botão DIREITO do mouse em qualquer célula da coluna SERVIÇOS
+
+Um menu popup aparecerá mostrando todas as portas abertas:
+
+  ┌──────────────────────────────────┐
+  │ Portas de 192.168.1.1            │
+  ├──────────────────────────────────┤
+  │ SSH (22)           ← clicável    │
+  │ HTTP (80)          ← clicável    │
+  │ MySQL (3306)       ← clicável    │
+  │ HTTPS (443)        ← clicável    │
+  └──────────────────────────────────┘
+
+PASSO 3: Clique em uma Porta
+─────────────────────────────
+Clique em qualquer porta para abrir no navegador/aplicação padrão.
+
+O protocolo correto é escolhido automaticamente:
+
+  SSH(22)        → ssh://192.168.1.1
+  HTTP(80)       → http://192.168.1.1:80
+  HTTPS(443)     → https://192.168.1.1:443
+  MySQL(3306)    → http://192.168.1.1:3306 (fallback)
+  FTP(21)        → ftp://192.168.1.1
+
+═══════════════════════════════════════════════════════════════════════════
+4. EXEMPLOS DE USO COMUM
+═══════════════════════════════════════════════════════════════════════════
+
+CENÁRIO 1: Acessar um Router
+────────────────────────────
+1. Tabela mostra: 192.168.1.1 | "HTTP(80), HTTPS(443), SSH(22)"
+2. Clique direito em "HTTP(80), HTTPS(443), SSH(22)"
+3. Menu: [ HTTP (80) ]  [ HTTPS (443) ]  [ SSH (22) ]
+4. Clique em "HTTPS (443)"
+5. Browser abre: https://192.168.1.1:443
+
+CENÁRIO 2: Conectar via SSH
+────────────────────────────
+1. Tabela mostra: 192.168.1.50 | "SSH(22), HTTP(80)"
+2. Clique direito em "SSH(22), HTTP(80)"
+3. Menu: [ SSH (22) ]  [ HTTP (80) ]
+4. Clique em "SSH (22)"
+5. Abre protocolo SSH (putty, terminal, etc.)
+
+CENÁRIO 3: Descobrir Banco de Dados
+────────────────────────────────────
+1. Tabela mostra: 192.168.1.100 | "MySQL(3306), SSH(22)"
+2. Clique direito em "MySQL(3306), SSH(22)"
+3. Menu: [ MySQL (3306) ]  [ SSH (22) ]
+4. Clique em "MySQL (3306)"
+5. Browser abre: http://192.168.1.100:3306 (PhpMyAdmin, etc.)
+
+═══════════════════════════════════════════════════════════════════════════
+5. INFORMAÇÕES EXIBIDAS
+═══════════════════════════════════════════════════════════════════════════
+
+A tabela mostra:
+
+┌──────────┬─────────────────────┬────────────────────────────────────┐
+│ Coluna   │ Significado         │ Exemplo                            │
+├──────────┼─────────────────────┼────────────────────────────────────┤
+│ #        │ Número sequencial   │ 1, 2, 3...                         │
+│ IP       │ Endereço IPv4       │ 192.168.1.1                        │
+│ MAC      │ Endereço físico     │ AA:BB:CC:DD:EE:FF                  │
+│ Hostname │ Nome DNS            │ router.local, printer.lan          │
+│ NetBIOS  │ Nome Windows        │ MEUPCRODAPE, IMPRESSORA            │
+│ Fab.     │ Fabricante (OUI)    │ Intel, Cisco, Samsung              │
+│ SERVIÇOS │ Portas abertas ◄◄◄ │ SSH(22), HTTP(80), HTTPS(443)      │
+│ Ping     │ Latência            │ 2ms (100%), 15ms (80%)             │
+│ Gráfico  │ Histórico visual    │ ▁▂▃▄▅▆▇█ (minigráfico unicode)    │
+│ Histórico│ Indicador qualidade │ ●●●●● (pontos de dados)            │
+└──────────┴─────────────────────┴────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════
+6. PROTOCOLOS SUPORTADOS
+═══════════════════════════════════════════════════════════════════════════
+
+SERVIDOR WEB:
+  21   FTP           → ftp://IP
+  80   HTTP          → http://IP:80
+  443  HTTPS         → https://IP:443
+  8000 HTTP-ALT      → http://IP:8000
+  8080 HTTP-ALT      → http://IP:8080
+  8443 HTTPS-ALT     → https://IP:8443
+  8888 HTTP-ALT      → http://IP:8888
+
+ADMINISTRAÇÃO REMOTA:
+  22   SSH           → ssh://IP
+  23   Telnet        → telnet://IP
+  3389 RDP           → rdp://IP
+
+BANCOS DE DADOS:
+  3306 MySQL         → http://IP:3306 (PhpMyAdmin, etc.)
+  5432 PostgreSQL    → http://IP:5432
+  27017 MongoDB      → http://IP:27017
+
+SERVIÇOS DE REDE:
+  25   SMTP          → smtp://IP
+  53   DNS           → (sem URL, apenas detecta)
+  110  POP3          → pop3://IP
+  143  IMAP          → imap://IP
+  465  SMTPS         → smtps://IP
+  587  SMTP+TLS      → smtp://IP
+  993  IMAPS         → imaps://IP
+  995  POP3S         → pop3s://IP
+
+CACHE/BANCO DE DADOS:
+  445  SMB           → (rede Windows)
+  5900 VNC           → vnc://IP
+  6379 Redis         → (sem URL)
+  9100 Printer       → (porta de impressora)
+  50070 Hadoop       → http://IP:50070
+
+FALLBACK:
+  Qualquer outra porta → http://IP:PORTA
+
+═══════════════════════════════════════════════════════════════════════════
+7. DICAS E TRUQUES
+═══════════════════════════════════════════════════════════════════════════
+
+DICA 1: Clique Esquerdo para Gráfico
+─────────────────────────────────────
+Clique esquerdo (normal) em um IP para ver o gráfico de ping ao lado.
+
+DICA 2: Selecionar Coluna Correta
+──────────────────────────────────
+Se o menu não aparecer, confirme que clicou na coluna "SERVIÇOS".
+Outras colunas (IP, MAC, etc.) não acionam o menu de portas.
+
+DICA 3: Sem Portas Abertas?
+───────────────────────────
+Se um dispositivo mostra "Nenhum" na coluna SERVIÇOS:
+- A varredura ainda não completou (aguarde)
+- Todas as portas comuns estão fechadas
+- O dispositivo pode estar bloqueando (firewall)
+
+DICA 4: Abrir no Browser
+────────────────────────
+Depois de descobrir um IP, clique nele e use o botão "🌐 Abrir no Browser"
+para acessar a porta padrão (80) ou 443 se HTTP não funcionar.
+
+DICA 5: Logs
+────────────
+Abra a aba "LOGS" para ver eventos como:
+[IP] Escaneando portas...
+[IP] Serviços encontrados: SSH(22), HTTP(80)
+Abrindo HTTP(80) em 192.168.1.1: http://192.168.1.1:80
+
+═══════════════════════════════════════════════════════════════════════════
+8. SOLUÇÃO DE PROBLEMAS
+═══════════════════════════════════════════════════════════════════════════
+
+PROBLEMA: Menu não abre ao clicar direito
+SOLUÇÃO: 
+  1. Verifique se clicou na coluna "SERVIÇOS" (não em outras colunas)
+  2. Se mostrar "Nenhum", uma mensagem informará isso
+  3. Aguarde o scan completar (primeiros 10 segundos)
+
+PROBLEMA: Porta não abre no navegador
+SOLUÇÃO:
+  1. Confirme que o dispositivo está online (ping deve ser verde)
+  2. A porta pode estar bloqueada por firewall
+  3. Tente acessar diretamente: http://IP:PORTA no endereço
+  4. Alguns protocolos podem não estar instalados (SSH, VNC)
+
+PROBLEMA: Portas não aparecem na tabela
+SOLUÇÃO:
+  1. Aguarde 10-15 segundos para o scan completar
+  2. Reduza o tamanho da rede em CONFIGURAÇÕES (menor range)
+  3. Aumentar o intervalo de scan se a rede for muito grande
+
+═══════════════════════════════════════════════════════════════════════════
+9. CONFIGURAÇÕES
+═══════════════════════════════════════════════════════════════════════════
+
+Acesse a aba "CONFIGURAÇÕES" para ajustar:
+
+• Tentativas de Ping: Quantas vezes fazer ping em cada IP (padrão: 4)
+• Intervalo de Scan: Segundos entre varreduras completas (padrão: 60)
+  
+Após mudar configurações, clique "Iniciar" novamente.
+
+═══════════════════════════════════════════════════════════════════════════
+
+VERSÃO: 2.1
+DATA: Janeiro 2026
+DESENVOLVIDO PARA: Análise de Rede em Tempo Real
+
+═══════════════════════════════════════════════════════════════════════════

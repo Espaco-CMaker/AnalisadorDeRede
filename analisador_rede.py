@@ -45,8 +45,455 @@ import sys
 import platform
 import ipaddress
 import socket
+import concurrent.futures
 from tabulate import tabulate
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Optional, Dict
+
+
+# Tenta importar o atualizador OUI (opcional)
+try:
+    from atualizador_oui import AtualizadorOUI
+    ATUALIZADOR_DISPONIVEL = True
+except ImportError:
+    ATUALIZADOR_DISPONIVEL = False
+
+
+@dataclass
+class IdentificacaoEquipamento:
+    """Estrutura com informações de identificação de equipamento por MAC"""
+    mac_completo: str
+    oui: str
+    fabricante: str
+    tipo_equipamento: str
+    confianca: str  # "Alto", "Médio", "Baixo", "Desconhecido"
+    
+    def __str__(self):
+        return f"{self.fabricante} - {self.tipo_equipamento} (Confiança: {self.confianca})"
+    
+    def to_dict(self):
+        return {
+            "mac": self.mac_completo,
+            "oui": self.oui,
+            "fabricante": self.fabricante,
+            "tipo_equipamento": self.tipo_equipamento,
+            "confianca": self.confianca
+        }
+
+
+# Base de dados de OUIs (3 primeiros bytes do MAC)
+# Formato: OUI (com :) -> (Fabricante, Tipo)
+OUI_DATABASE = {
+    # Roteadores e Equipamentos de Rede
+    "00:0F:33": ("Arcadyan", "Roteador/Modem/ONT"),
+    "00:12:3F": ("Motorola", "Roteador/Modem"),
+    "00:1A:2F": ("Cisco", "Roteador/Switch"),
+    "00:23:CD": ("Huawei", "Roteador/Modem"),
+    "08:00:27": ("Cadmus Computer Systems", "Roteador Virtualizado"),
+    "08:9A:4A": ("Sagemcom", "Roteador/Modem"),
+    "0C:74:C3": ("Huawei", "Roteador/Modem"),
+    "1C:BD:B9": ("TP-Link", "Roteador/Switch/Access Point"),
+    "24:4B:03": ("Espressif", "ESP8266/ESP32 - IoT"),
+    "50:C7:BF": ("TP-Link", "Roteador/Access Point"),
+    "88:DC:96": ("TP-Link", "Roteador/Access Point"),
+    "9C:29:76": ("Compal", "Roteador/Modem"),
+    "B0:48:7A": ("TP-Link", "Roteador/Access Point"),
+    
+    # Smartphones e Tablets
+    "00:19:0E": ("Apple", "iPhone/iPad"),
+    "00:1F:F3": ("Apple", "iPhone/iPad"),
+    "00:3E:98": ("Apple", "iPhone/iPad"),
+    "00:A0:D2": ("Apple", "iPhone/iPad"),
+    "00:B0:D0": ("Apple", "iPhone/iPad/MacBook"),
+    "00:D4:97": ("Apple", "iPhone/iPad"),
+    "08:00:07": ("Apple", "iPhone/iPad/MacBook"),
+    "14:7D:DA": ("Apple", "iPhone/iPad"),
+    "1C:52:16": ("Apple", "iPhone/iPad/MacBook"),
+    "34:08:04": ("Apple", "iPhone/iPad"),
+    "3C:37:86": ("Apple", "iPhone/iPad"),
+    "6C:40:08": ("Apple", "iPhone/iPad/MacBook"),
+    "AC:BC:32": ("Apple", "iPhone/iPad/MacBook"),
+    "AC:DE:48": ("Apple", "iPhone/iPad/MacBook"),
+    "B8:8D:12": ("Apple", "iPhone/iPad/MacBook"),
+    "D4:6E:0E": ("Apple", "iPhone/iPad"),
+    "EC:F4:BB": ("Apple", "iPhone/iPad/MacBook"),
+    
+    # Samsung
+    "00:1A:7D": ("Samsung", "Smartphone/Tablet"),
+    "00:22:B0": ("Samsung", "Smartphone/Tablet"),
+    "00:60:64": ("Samsung", "Smartphone/Tablet"),
+    "08:D4:6C": ("Samsung", "Smartphone/Tablet"),
+    "60:FE:06": ("Samsung", "Smartphone/Tablet"),
+    "78:31:C1": ("Samsung", "Smartphone/Tablet"),
+    "84:25:DB": ("Samsung", "Smartphone/Tablet"),
+    "B0:E2:35": ("Samsung", "Smartphone/Tablet"),
+    "E4:E5:D7": ("Samsung", "Smartphone/Tablet"),
+    
+    # Amazon (Alexa / Echo)
+    "00:0C:6E": ("Amazon", "Echo/Alexa/Fire TV"),
+    "14:CC:20": ("Amazon", "Echo/Alexa/Fire TV"),
+    "18:74:2E": ("Amazon", "Echo/Alexa/Fire TV"),
+    "4C:EF:C0": ("Amazon", "Echo/Alexa/Fire TV"),
+    "88:E9:FE": ("Amazon", "Echo/Alexa/Fire TV"),
+    
+    # Google
+    "00:25:86": ("Google", "Nexus/Pixel/Chromecast"),
+    "00:4D:6D": ("Google", "Nexus/Pixel"),
+    "08:ED:B7": ("Google", "Chromecast/Nest"),
+    "18:B7:9E": ("Google", "Nest/Chromecast"),
+    "F4:F5:DB": ("Google", "Nest/Chromecast"),
+    
+    # Microsoft
+    "00:1D:D8": ("Microsoft", "Xbox/Laptop"),
+    "00:50:F2": ("Microsoft", "Windows PC/Laptop"),
+    "3C:37:36": ("Microsoft", "Surface/Laptop"),
+    "BC:5F:F4": ("Microsoft", "Xbox/Laptop"),
+    
+    # Impressoras
+    "00:09:6B": ("Hewlett-Packard", "Impressora HP"),
+    "00:0A:95": ("Lexmark", "Impressora Lexmark"),
+    "00:11:2F": ("Brother", "Impressora Brother"),
+    "00:1F:2E": ("Canon", "Impressora Canon"),
+    "00:24:A9": ("Xerox", "Impressora Xerox"),
+    "08:00:69": ("Xerox", "Impressora Xerox"),
+    "1C:C6:3C": ("Hewlett-Packard", "Impressora HP"),
+    "50:46:5D": ("Hewlett-Packard", "Impressora HP"),
+    "78:E1:03": ("Brother", "Impressora Brother"),
+    "BC:67:47": ("Ricoh", "Impressora/Multifuncional"),
+    
+    # Câmeras de Segurança
+    "00:0D:3D": ("Axis Communications", "Câmera IP"),
+    "00:11:34": ("D-Link", "Câmera IP"),
+    "00:30:F1": ("Hikvision", "Câmera IP/NVR"),
+    "10:FD:B8": ("Dahua", "Câmera IP/NVR"),
+    "2C:F0:5D": ("Hikvision", "Câmera IP/NVR"),
+    "54:A0:50": ("TP-Link", "Câmera IP"),
+    "74:AC:B9": ("Dahua", "Câmera IP/NVR"),
+    "9C:2A:70": ("Opticam", "Câmera IP"),
+    "DC:FE:18": ("Hikvision", "Câmera IP/NVR"),
+    
+    # Smart TVs
+    "00:0B:8C": ("LG Electronics", "Smart TV/Monitor"),
+    "00:1E:8F": ("Samsung", "Smart TV"),
+    "00:E0:4C": ("Sony", "Smart TV"),
+    "08:00:37": ("Samsung", "Smart TV"),
+    "34:13:E8": ("LG Electronics", "Smart TV"),
+    "78:BD:BC": ("Vizio", "Smart TV"),
+    "9C:6B:00": ("TCL", "Smart TV"),
+    "B0:AD:17": ("Philips", "Smart TV/Monitor"),
+    
+    # Relógios e Wearables
+    "00:22:D0": ("Polar Electro", "Relógio/Fitness"),
+    "10:2A:B2": ("Fossil Group", "Smartwatch"),
+    "5C:52:84": ("Fitbit", "Fitness Tracker"),
+    "60:D5:A8": ("Garmin", "Smartwatch/GPS"),
+    "78:A1:06": ("Jawbone", "Fitness Tracker"),
+    "9C:AA:1B": ("Apple Watch", "Smartwatch"),
+    
+    # Dispositivos IoT e Sonoff
+    "34:94:54": ("Sunricher", "Controlador RGB"),
+    "60:01:94": ("Shenzhen Suntop", "Relé WiFi"),
+    "84:F3:EB": ("Lumi United", "Hub Zigbee"),
+    "BC:33:AC": ("Gledopto", "Controlador LED"),
+    
+    # NAS e Servidores
+    "00:11:32": ("Synology", "NAS"),
+    "00:50:3F": ("NetApp", "NAS/Storage"),
+    "08:00:22": ("Qnap", "NAS"),
+    "90:09:D8": ("Seagate", "NAS"),
+    "AA:BB:CC": ("Western Digital", "NAS"),
+    
+    # Outros Fabricantes Comuns
+    "02:00:00": ("Mikrotik", "RouterOS"),
+    "00:13:10": ("Linksys", "Roteador Wireless"),
+}
+
+
+def atualizar_oui_database_online() -> Dict[str, tuple]:
+    """
+    Atualiza a base de dados OUI a partir de fontes online.
+    
+    Usa o módulo atualizador_oui para carregar dados da IEEE/Wireshark
+    e mescla com dados locais customizados.
+    
+    Returns:
+        Dict: Banco de dados OUI atualizado {OUI: (Fabricante, Tipo)}
+    """
+    global OUI_DATABASE
+    
+    if not ATUALIZADOR_DISPONIVEL:
+        print("[WARN] Módulo atualizador_oui não disponível - usando cache local")
+        return OUI_DATABASE
+    
+    try:
+        print("[INFO] Atualizando base OUI online...")
+        atualizador = AtualizadorOUI()
+        
+        # Tenta atualizar
+        sucesso = atualizador.atualizar_online(forcar=False)
+        
+        if sucesso:
+            novo_banco = atualizador.obter_oui_database()
+            OUI_DATABASE.update(novo_banco)
+            print(f"[OK] Base OUI atualizada com {len(OUI_DATABASE)} OUIs")
+            return OUI_DATABASE
+        else:
+            print("[INFO] Usando cache local de OUI")
+            return OUI_DATABASE
+    
+    except Exception as e:
+        print(f"[WARN] Erro ao atualizar OUI online: {e}")
+        return OUI_DATABASE
+
+
+def carregar_oui_database_local() -> Dict[str, tuple]:
+    """
+    Carrega base OUI do cache local (JSON).
+    
+    Returns:
+        Dict: Banco de dados OUI {OUI: (Fabricante, Tipo)}
+    """
+    global OUI_DATABASE
+    
+    if not ATUALIZADOR_DISPONIVEL:
+        return OUI_DATABASE
+    
+    try:
+        atualizador = AtualizadorOUI()
+        novo_banco = atualizador.carregar_oui_local()
+        OUI_DATABASE.update(novo_banco)
+        print(f"[OK] Carregados {len(novo_banco)} OUIs do cache local")
+        return OUI_DATABASE
+    except Exception as e:
+        print(f"[WARN] Erro ao carregar OUI local: {e}")
+        return OUI_DATABASE
+
+
+def inicializar_oui_database(atualizar_online: bool = False):
+    """
+    Inicializa o banco de dados OUI.
+    
+    Args:
+        atualizar_online (bool): Se True, tenta atualizar a partir de fontes online
+    """
+    global OUI_DATABASE
+    
+    if atualizar_online and ATUALIZADOR_DISPONIVEL:
+        atualizar_oui_database_online()
+    else:
+        carregar_oui_database_local()
+    
+    if len(OUI_DATABASE) < 10:
+        print(f"[WARN] Banco OUI pequeno ({len(OUI_DATABASE)} OUIs)")
+
+
+def _normalizar_mac(mac: str) -> str:
+    """Normaliza MAC para formato com ':'"""
+    mac = mac.upper().replace("-", ":").replace(" ", "")
+    if ":" not in mac:
+        mac = ":".join([mac[i:i+2] for i in range(0, 12, 2)])
+    return mac
+
+
+def _extrair_oui(mac: str) -> str:
+    """Extrai os 3 primeiros bytes (OUI) do MAC"""
+    mac_normalizado = _normalizar_mac(mac)
+    return mac_normalizado[:8].upper()
+
+
+def _aplicar_heuristicas(fabricante: str, tipo_base: str) -> tuple[str, str]:
+    """
+    Aplica regras heurísticas para refinar a identificação de equipamento
+    baseado no nome do fabricante.
+    
+    Retorna: (tipo_refinado, confianca)
+    """
+    fabricante_lower = fabricante.lower()
+    
+    # Regras para Espressif (ESP8266/ESP32)
+    if "espressif" in fabricante_lower:
+        return "ESP8266/ESP32 - Sonoff/IoT/Sensor WiFi", "Alto"
+    
+    # Regras para Apple
+    if "apple" in fabricante_lower:
+        if "watch" in tipo_base.lower():
+            return "Apple Watch - Smartwatch", "Alto"
+        return "iPhone/iPad/MacBook/Apple TV", "Médio"
+    
+    # Regras para Amazon
+    if "amazon" in fabricante_lower:
+        return "Amazon Echo/Alexa/Fire TV", "Alto"
+    
+    # Regras para Google
+    if "google" in fabricante_lower:
+        if "nest" in tipo_base.lower():
+            return "Google Nest/Chromecast/Home", "Alto"
+        return "Nexus/Pixel/Chromecast", "Médio"
+    
+    # Regras para Samsung
+    if "samsung" in fabricante_lower:
+        if "smart tv" in tipo_base.lower() or "tv" in tipo_base.lower():
+            return "Samsung Smart TV", "Alto"
+        return "Smartphone/Tablet Galaxy", "Médio"
+    
+    # Regras para Arcadyan
+    if "arcadyan" in fabricante_lower:
+        return "Roteador/Modem/ONT de Operadora", "Alto"
+    
+    # Regras para Hikvision
+    if "hikvision" in fabricante_lower:
+        return "Câmera IP/NVR Hikvision", "Alto"
+    
+    # Regras para Dahua
+    if "dahua" in fabricante_lower:
+        return "Câmera IP/NVR Dahua", "Alto"
+    
+    # Regras para TP-Link
+    if "tp-link" in fabricante_lower:
+        if "access point" in tipo_base.lower():
+            return "TP-Link Access Point/Repetidor WiFi", "Alto"
+        return "TP-Link Roteador/Switch/WiFi", "Médio"
+    
+    # Regras para Synology
+    if "synology" in fabricante_lower:
+        return "Synology NAS - Network Storage", "Alto"
+    
+    # Regras para Qnap
+    if "qnap" in fabricante_lower:
+        return "QNAP NAS - Network Storage", "Alto"
+    
+    # Regras para Hewlett-Packard
+    if "hewlett" in fabricante_lower or "hp" in fabricante_lower:
+        return "Impressora/Multifuncional HP", "Alto"
+    
+    # Regras para Brother
+    if "brother" in fabricante_lower:
+        return "Impressora Brother", "Alto"
+    
+    # Regras para Canon
+    if "canon" in fabricante_lower:
+        return "Impressora Canon", "Alto"
+    
+    # Regras para Xerox
+    if "xerox" in fabricante_lower:
+        return "Impressora/Multifuncional Xerox", "Alto"
+    
+    # Regras para Cisco
+    if "cisco" in fabricante_lower:
+        return "Cisco Roteador/Switch/Equipamento Profissional", "Alto"
+    
+    # Regras para Huawei
+    if "huawei" in fabricante_lower:
+        return "Huawei Roteador/Modem/5G", "Médio"
+    
+    # Regras para Microsoft
+    if "microsoft" in fabricante_lower:
+        return "Microsoft Xbox/Surface/Windows PC", "Médio"
+    
+    # Se não se encaixa em nenhuma heurística, usa o tipo base
+    return tipo_base, "Baixo" if tipo_base == "Desconhecido" else "Médio"
+
+
+def identificar_equipamento_por_mac(mac: str) -> IdentificacaoEquipamento:
+    """
+    Identifica o nome provável e tipo de equipamento a partir de um endereço MAC.
+    
+    Args:
+        mac (str): Endereço MAC no formato "24:4B:03:AA:BB:CC" ou "244B03AABBCC"
+    
+    Returns:
+        IdentificacaoEquipamento: Objeto com informações estruturadas
+    
+    Exemplos:
+        >>> resultado = identificar_equipamento_por_mac("24:4B:03:AA:BB:CC")
+        >>> print(resultado.fabricante)
+        Espressif
+        >>> print(resultado.tipo_equipamento)
+        ESP8266/ESP32 - Sonoff/IoT/Sensor WiFi
+        
+        >>> resultado = identificar_equipamento_por_mac("00:1A:7D:BB:CC:DD")
+        >>> print(resultado.fabricante)
+        Samsung
+    """
+    # Normaliza MAC
+    mac_normalizado = _normalizar_mac(mac)
+    
+    # Valida formato MAC
+    if not re.match(r"^([0-9A-F]{2}:){5}([0-9A-F]{2})$", mac_normalizado):
+        return IdentificacaoEquipamento(
+            mac_completo=mac_normalizado,
+            oui="INVÁLIDO",
+            fabricante="Erro",
+            tipo_equipamento="MAC inválido",
+            confianca="Desconhecido"
+        )
+    
+    # Extrai OUI
+    oui = _extrair_oui(mac_normalizado)
+    
+    # Consulta banco de dados de OUIs (verifica vários formatos)
+    fabricante = None
+    tipo_base = None
+    
+    # Tenta com formato com dois-pontos (24:4B:03)
+    if oui in OUI_DATABASE:
+        fabricante, tipo_base = OUI_DATABASE[oui]
+    # Tenta sem dois-pontos (244B03)
+    elif oui.replace(":", "") in OUI_DATABASE:
+        fabricante, tipo_base = OUI_DATABASE[oui.replace(":", "")]
+    # Tenta case-insensitive
+    else:
+        oui_lower = oui.lower()
+        for chave, valor in OUI_DATABASE.items():
+            chave_normalizada = chave.upper().replace(":", "")
+            oui_normalizado = oui.upper().replace(":", "")
+            if chave_normalizada == oui_normalizado:
+                fabricante, tipo_base = valor
+                break
+    
+    # Se não encontrou
+    if fabricante is None:
+        return IdentificacaoEquipamento(
+            mac_completo=mac_normalizado,
+            oui=oui,
+            fabricante="Desconhecido",
+            tipo_equipamento="Equipamento não identificado no banco de dados",
+            confianca="Desconhecido"
+        )
+    
+    # Aplica heurísticas para refinar o tipo
+    tipo_refinado, confianca = _aplicar_heuristicas(fabricante, tipo_base)
+    
+    return IdentificacaoEquipamento(
+        mac_completo=mac_normalizado,
+        oui=oui,
+        fabricante=fabricante,
+        tipo_equipamento=tipo_refinado,
+        confianca=confianca
+    )
+
+
+def identificar_multiplos_equipamentos(macs: Dict[str, str]) -> Dict[str, IdentificacaoEquipamento]:
+    """
+    Identifica múltiplos equipamentos a partir de uma lista de MACs.
+    
+    Args:
+        macs (Dict[str, str]): Dicionário {IP: MAC}
+    
+    Returns:
+        Dict[str, IdentificacaoEquipamento]: Dicionário {IP: IdentificacaoEquipamento}
+    
+    Exemplo:
+        >>> dispositivos = {"192.168.1.1": "24:4B:03:AA:BB:CC", "192.168.1.2": "00:1A:7D:BB:CC:DD"}
+        >>> resultado = identificar_multiplos_equipamentos(dispositivos)
+        >>> for ip, info in resultado.items():
+        ...     print(f"{ip}: {info.fabricante} - {info.tipo_equipamento}")
+    """
+    resultado = {}
+    for ip, mac in macs.items():
+        resultado[ip] = identificar_equipamento_por_mac(mac)
+    return resultado
 
 
 def run_cmd_capture(cmd, timeout=None):
@@ -141,10 +588,15 @@ def fazer_arp_scan(ip_local, mascara):
             padrao = r"(\d+\.\d+\.\d+\.\d+)\s+([a-fA-F0-9\-]{17})"
             matches = re.findall(padrao, texto_arp)
             
+            # Calcula endereço de broadcast para filtrar
+            endereco_broadcast = str(rede.broadcast_address)
+            endereco_rede = str(rede.network_address)
+            
             for ip, mac in matches:
                 try:
                     ip_obj = ipaddress.IPv4Address(ip)
-                    if ip_obj in rede:
+                    # Filtra broadcast (.255) e endereço de rede (.0)
+                    if ip_obj in rede and ip != endereco_broadcast and ip != endereco_rede:
                         dispositivos[ip] = mac.replace("-", ":")
                 except:
                     pass
@@ -153,9 +605,15 @@ def fazer_arp_scan(ip_local, mascara):
             if len(dispositivos) < 3:
                 print("[INFO] Descobrindo dispositivos na rede (aguarde ~30s)...")
                 
-                # Faz ping para endereços da rede
+                # Calcula o endereço de broadcast para filtrar
+                endereco_broadcast = str(rede.broadcast_address)
+                
+                # Faz ping para endereços da rede (excluindo broadcast)
                 for host in list(rede.hosts())[:255]:
                     ip_alvo = str(host)
+                    # Ignora o endereço de broadcast
+                    if ip_alvo == endereco_broadcast:
+                        continue
                     try:
                         subprocess.run(["ping", "-n", "1", "-w", "100", ip_alvo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1)
                     except:
@@ -165,10 +623,12 @@ def fazer_arp_scan(ip_local, mascara):
                 texto_arp = run_cmd_capture(["arp", "-a"]) or ""
                 matches = re.findall(padrao, texto_arp)
                 dispositivos = {}
+                endereco_broadcast = str(rede.broadcast_address)
                 for ip, mac in matches:
                     try:
                         ip_obj = ipaddress.IPv4Address(ip)
-                        if ip_obj in rede:
+                        # Filtra endereço de broadcast e endereço de rede
+                        if ip_obj in rede and ip != endereco_broadcast and ip != str(rede.network_address):
                             dispositivos[ip] = mac.replace("-", ":")
                     except:
                         pass
@@ -654,6 +1114,108 @@ def buscar_mac_online(mac):
     except Exception:
         pass
     return None
+
+# Mapa de portas -> serviços (expandido com portas comuns)
+PORTA_SERVICOS = {
+    21: "FTP",
+    22: "SSH",
+    23: "Telnet",
+    25: "SMTP",
+    53: "DNS",
+    80: "HTTP",
+    110: "POP3",
+    143: "IMAP",
+    443: "HTTPS",
+    445: "SMB",
+    465: "SMTPS",
+    587: "SMTP",
+    993: "IMAPS",
+    995: "POP3S",
+    1433: "MSSQL",
+    3306: "MySQL",
+    3389: "RDP",
+    5432: "PostgreSQL",
+    5900: "VNC",
+    6379: "Redis",
+    8000: "HTTP-ALT",
+    8080: "HTTP-ALT",
+    8443: "HTTPS-ALT",
+    8888: "HTTP-ALT",
+    9100: "Printer",
+    27017: "MongoDB",
+    50070: "Hadoop"
+}
+
+def escanear_portas(ip, timeout=0.5):
+    """Escaneia TODAS as portas comuns para descobrir serviços rodando (threaded)"""
+    portas_abertas = []
+    
+    # Expandir para incluir mais portas comuns
+    portas_teste = list(PORTA_SERVICOS.keys())
+    
+    def testar_porta(porta):
+        """Testa uma porta específica"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            resultado = sock.connect_ex((ip, porta))
+            sock.close()
+            
+            if resultado == 0:
+                return porta
+        except Exception:
+            pass
+        return None
+    
+    # Escaneia portas em paralelo (até 20 threads)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        resultados = executor.map(testar_porta, portas_teste)
+        portas_abertas = [p for p in resultados if p is not None]
+    
+    if not portas_abertas:
+        return "Nenhum"
+    
+    # Organiza resultado
+    servicos = []
+    for porta in sorted(portas_abertas):
+        servico = PORTA_SERVICOS.get(porta, f"Port:{porta}")
+        servicos.append(f"{servico}({porta})")
+    
+    return ", ".join(servicos)
+
+def escanear_todas_portas(ip, timeout=0.3, max_porta=1024):
+    """Escaneia TODAS as portas até max_porta (mais lento, mas completo)"""
+    portas_abertas = []
+    
+    def testar_porta(porta):
+        """Testa uma porta específica"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            resultado = sock.connect_ex((ip, porta))
+            sock.close()
+            
+            if resultado == 0:
+                return porta
+        except Exception:
+            pass
+        return None
+    
+    # Escaneia portas em paralelo (até 50 threads para mais velocidade)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        resultados = executor.map(testar_porta, range(1, max_porta + 1))
+        portas_abertas = [p for p in resultados if p is not None]
+    
+    if not portas_abertas:
+        return "Nenhum"
+    
+    # Organiza resultado
+    servicos = []
+    for porta in sorted(portas_abertas):
+        servico = PORTA_SERVICOS.get(porta, f"Port:{porta}")
+        servicos.append(f"{servico}({porta})")
+    
+    return ", ".join(servicos)
 
 def obter_info_dispositivo(ip, mac):
     """Tenta obter hostname e fabricante do dispositivo"""
