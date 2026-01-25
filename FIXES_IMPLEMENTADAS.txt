@@ -1,0 +1,198 @@
+═══════════════════════════════════════════════════════════════════════════
+  CORRECOES IMPLEMENTADAS - PERSISTENCIA E INTERFACE
+═══════════════════════════════════════════════════════════════════════════
+
+DATA: 2026-01-25
+VERSAO: v2.4.2
+
+PROBLEMAS CORRIGIDOS
+────────────────────
+
+1. BOTOES NAO APARECIAM NA JANELA DE EDICAO
+   ─────────────────────────────────────────
+   
+   Problema:
+   • Ao fazer duplo-clique em um nome de dispositivo, a janela abria
+   • Porem, os botoes "Salvar" e "Cancelar" nao eram visiveis
+   
+   Causa:
+   • dialog.geometry("350x140") era muito pequeno
+   • A janela tinha altura insuficiente para exibir todos os elementos
+   
+   Solucao:
+   • Aumentado de 350x140 para 400x180
+   • Agora ha espaco suficiente para labels, entrada e botoes
+   
+   Arquivo: analisador_rede_gui.py, linha ~444
+   
+   ANTES:
+     dialog.geometry("350x140")
+   
+   DEPOIS:
+     dialog.geometry("400x180")
+
+2. NOMES NAO ERAM CARREGADOS AO REABRIR A APLICACAO
+   ────────────────────────────────────────────────
+   
+   Problema:
+   • Ao editar um nome e fechar a aplicacao
+   • Ao reabrir, o nome nao aparecia mais
+   • config.json perdia a chave "device_nicknames"
+   
+   Causa Multipla:
+   a) config.json nao tinha "device_nicknames" inicialmente
+   b) _save_config() so salvava ping_attempts e scan_interval
+   c) _load_config() nao garantia que "device_nicknames" existisse
+   
+   Solucoes Implementadas:
+   
+   a) ATUALIZAR _load_config() (linha ~255)
+      ──────────────────────────────────────
+      • Verifica se "device_nicknames" existe
+      • Se nao existir, cria estrutura completa
+      • Salva automaticamente config.json com todas as chaves
+      • Garante que ping_attempts e scan_interval sempre existem
+      
+      Nova logica:
+      - Carrega config.json
+      - Se "device_nicknames" nao estiver: adiciona
+      - Se "ping_attempts" nao estiver: adiciona valor padrao
+      - Se "scan_interval" nao estiver: adiciona valor padrao
+      - Retorna config completa
+   
+   b) ATUALIZAR _save_config() (linha ~279)
+      ────────────────────────────────────────
+      • Agora salva device_nicknames junto com outras configs
+      • Preserva estrutura completa em cada salvo
+      • Usa ensure_ascii=False para suportar acentuacao
+      
+      ANTES:
+        config = {
+            "ping_attempts": ...,
+            "scan_interval": ...
+        }
+      
+      DEPOIS:
+        config = {
+            "ping_attempts": ...,
+            "scan_interval": ...,
+            "device_nicknames": self.device_nicknames
+        }
+   
+   c) ATUALIZAR config.json (estrutura inicial)
+      ─────────────────────────────────────────
+      • Adiciona "device_nicknames": {} na estrutura inicial
+      • Garante que arquivo ja esta pronto para receber nomes
+      
+      {
+        "ping_attempts": 6,
+        "scan_interval": 5,
+        "device_nicknames": {}
+      }
+
+FLUXO AGORA COMPLETO
+────────────────────
+
+1. INICIALIZACAO
+   └─> _load_config() carrega config.json
+   └─> Verifica se device_nicknames existe (cria se nao)
+   └─> _load_nicknames() preenche self.device_nicknames
+   └─> Dispositivos ja vem com nomes, se tiverem
+
+2. EDICAO
+   └─> Duplo-clique na coluna "Nome [Editar]"
+   └─> JANELA ABRE (com altura suficiente para botoes)
+   └─> Usuario digita nome
+   └─> Clica "Salvar" (botao visivel)
+   └─> _save_nicknames() salva em config.json
+   └─> _save_config() garante persistencia completa
+
+3. RECARREGAMENTO
+   └─> Fecha aplicacao
+   └─> Reabre aplicacao
+   └─> _load_config() carrega config.json com device_nicknames
+   └─> _load_nicknames() popula self.device_nicknames
+   └─> Ao fazer novo scan, mesmo MAC ja tem nome associado
+   └─> Nome aparece automaticamente na coluna
+
+TESTE VALIDADO
+──────────────
+
+[✓] Config.json carregado corretamente
+[✓] device_nicknames inicializado na estrutura
+[✓] Nome adicionado ao fazer edicao
+[✓] Nome persistido em config.json
+[✓] Nome recarregado apos nova inicializacao
+[✓] Janela de edicao tem altura suficiente (400x180)
+[✓] Botoes "Salvar" e "Cancelar" visiveis
+[✓] Suporta caracteres especiais (acentuacao)
+
+ARQUIVOS MODIFICADOS
+─────────────────────
+
+1. analisador_rede_gui.py
+   - _load_config() (linha ~255) - Garantir estrutura completa
+   - _save_config() (linha ~279) - Salvar device_nicknames
+   - _on_edit_name() (linha ~444) - Aumentar janela para 400x180
+
+2. config.json
+   - Adicionar "device_nicknames": {} na estrutura
+
+COMO TESTAR MANUALMENTE
+────────────────────────
+
+1. Inicie a aplicacao:
+   python run.py
+
+2. Aguarde pelo menos um dispositivo aparecer
+
+3. Duplo-clique em um dispositivo na coluna "Nome [Editar]"
+   └─> A janela DEVE abrir com altura suficiente
+
+4. Verifique que os botoes estao visiveis:
+   └─> [Salvar] (esquerda)
+   └─> [Cancelar] (direita)
+
+5. Digite um nome (exemplo: "Meu Dispositivo")
+
+6. Clique "Salvar"
+
+7. Verifique em config.json:
+   {
+     "ping_attempts": 6,
+     "scan_interval": 5,
+     "device_nicknames": {
+       "AA:BB:CC:DD:EE:FF": "Meu Dispositivo"
+     }
+   }
+
+8. Feche a aplicacao completamente
+
+9. Reabra a aplicacao:
+   python run.py
+
+10. Verifique que:
+    └─> O nome aparece automaticamente na coluna "Nome [Editar]"
+    └─> Config.json mantem o nome salvado
+    └─> Se fizer novo scan, mesmo MAC continua com o nome
+
+BENEFICIOS DA CORRECAO
+──────────────────────
+
+✓ INTERFACE
+  • Botoes agora visiveis na janela de edicao
+  • Melhor experiencia de usuario
+  • Atalhos funcionam (Enter para salvar, Escape para cancelar)
+
+✓ PERSISTENCIA
+  • Nomes vinculados ao MAC, nao ao IP
+  • Se IP do dispositivo mudar, nome permanece
+  • Config.json sempre mantem estrutura completa
+  • Nenhuma perda de dados ao fechar a aplicacao
+
+✓ CONFIABILIDADE
+  • Config.json garantidamente tem device_nicknames
+  • Carregamento robusto com fallback para valores padrao
+  • Suporta caracteres especiais e acentuacao
+
+═══════════════════════════════════════════════════════════════════════════

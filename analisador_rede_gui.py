@@ -96,6 +96,14 @@ class NetworkAnalyzerApp:
         config = self._load_config()
         self._load_nicknames()  # Carrega apelidos de dispositivos
         
+        # Inicializa banco OUI (fabricantes) - carrega do cache local
+        try:
+            from analisador_rede import inicializar_oui_database
+            inicializar_oui_database(atualizar_online=False)
+            print("[OK] Banco OUI inicializado com sucesso")
+        except Exception as e:
+            print(f"[AVISO] Erro ao inicializar banco OUI: {e}")
+        
         # Configurações
         self.ping_attempts = tk.IntVar(value=config.get("ping_attempts", 4))
         self.scan_interval = tk.IntVar(value=config.get("scan_interval", 60))  # segundos
@@ -254,23 +262,41 @@ class NetworkAnalyzerApp:
     # Persistência de configurações
     def _load_config(self):
         """Carrega configurações do arquivo config.json"""
+        default_config = {"ping_attempts": 4, "scan_interval": 60, "device_nicknames": {}}
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    config = json.load(f)
+                    # Garante que device_nicknames existe
+                    if "device_nicknames" not in config:
+                        config["device_nicknames"] = {}
+                    # Garante que ping_attempts e scan_interval existem
+                    if "ping_attempts" not in config:
+                        config["ping_attempts"] = default_config["ping_attempts"]
+                    if "scan_interval" not in config:
+                        config["scan_interval"] = default_config["scan_interval"]
+                    return config
         except Exception as e:
             print(f"Erro ao carregar config: {e}")
-        return {}
+        
+        # Salva config padrão se não existir arquivo
+        try:
+            with open(self.config_file, "w", encoding="utf-8") as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+        except:
+            pass
+        return default_config
     
     def _save_config(self):
         """Salva configurações no arquivo config.json"""
         try:
             config = {
                 "ping_attempts": self.ping_attempts.get(),
-                "scan_interval": self.scan_interval.get()
+                "scan_interval": self.scan_interval.get(),
+                "device_nicknames": self.device_nicknames
             }
             with open(self.config_file, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2)
+                json.dump(config, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"Erro ao salvar config: {e}")
     
@@ -440,7 +466,7 @@ class NetworkAnalyzerApp:
         # Cria janela de edição
         dialog = tk.Toplevel(self.root)
         dialog.title("Editar Nome do Dispositivo")
-        dialog.geometry("350x140")
+        dialog.geometry("400x180")
         dialog.resizable(False, False)
         dialog.grab_set()  # Modal
         
@@ -508,15 +534,29 @@ class NetworkAnalyzerApp:
     def _save_nicknames(self):
         """Salva apelidos de dispositivos no arquivo de configuração"""
         try:
-            config = {}
+            config = {
+                "ping_attempts": self.ping_attempts.get(),
+                "scan_interval": self.scan_interval.get()
+            }
+            
+            # Carrega config existente para não perder outras configurações
             if os.path.exists(self.config_file):
-                with open(self.config_file, "r", encoding="utf-8") as f:
-                    config = json.load(f)
+                try:
+                    with open(self.config_file, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                        # Preserva outras configurações que possam existir
+                        for key in existing:
+                            if key not in config:
+                                config[key] = existing[key]
+                except:
+                    pass
             
             config["device_nicknames"] = self.device_nicknames
             
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
+                
+            print(f"[DEBUG] Config salvo: {len(self.device_nicknames)} nomes salvos")
         except Exception as e:
             print(f"Erro ao salvar apelidos: {e}")
     

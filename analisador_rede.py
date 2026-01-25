@@ -1231,35 +1231,33 @@ def obter_info_dispositivo(ip, mac):
     except Exception:
         hostname = "N/A"
     
-    # Tenta extrair fabricante do MAC (OUI - Organizationally Unique Identifier)
+    # Usa a função de identificação por MAC que já integra OUI database online
     if mac and mac != "N/A":
-        mac_upper = mac.upper()
-        
-        # Primeiro tenta com os 6 primeiros caracteres (XX:XX:XX)
-        oui_6 = mac_upper[:8]  # "XX:XX:XX"
-        if oui_6 in OUI_DATABASE:
-            fabricante = OUI_DATABASE[oui_6]
-        else:
-            # Tenta com 5 primeiros caracteres (XX:XX)
-            oui_5 = mac_upper[:5]  # "XX:XX"
-            for oui, brand in OUI_DATABASE.items():
-                if oui.startswith(oui_5):
-                    fabricante = brand
-                    break
+        try:
+            identificacao = identificar_equipamento_por_mac(mac)
+            if identificacao and identificacao.fabricante:
+                # Extrai apenas o nome do fabricante (remove tabs/espaços extras)
+                fabricante = identificacao.fabricante.split('\t')[0].strip()
+                if not fabricante or fabricante == "Desconhecido":
+                    fabricante = "Desconhecido"
+        except Exception as e:
+            # Fallback para método antigo se houver erro
+            mac_upper = mac.upper()
+            oui_6 = mac_upper[:8]  # "XX:XX:XX"
             
-            # Se ainda não encontrou, tenta com 2 primeiros caracteres
-            if fabricante == "Desconhecido":
-                oui_2 = mac_upper[:2]
-                for oui, brand in OUI_DATABASE.items():
-                    if oui.startswith(oui_2):
-                        fabricante = brand
-                        break
-            
-            # Se ainda assim não encontrou, tenta buscar online (opcional)
-            if fabricante == "Desconhecido":
-                resultado_online = buscar_mac_online(mac)
-                if resultado_online:
-                    fabricante = resultado_online[:30]  # limita comprimento
+            if oui_6 in OUI_DATABASE:
+                info = OUI_DATABASE[oui_6]
+                # Verifica se é dict (nova estrutura) ou string (antiga estrutura)
+                if isinstance(info, dict):
+                    fabricante = info.get("fabricante", "Desconhecido")
+                elif isinstance(info, tuple):
+                    fabricante = info[0] if len(info) > 0 else "Desconhecido"
+                else:
+                    fabricante = str(info)
+                
+                # Limpa formatação (remove tabs)
+                if fabricante:
+                    fabricante = fabricante.split('\t')[0].strip()
     
     return hostname, fabricante
 
