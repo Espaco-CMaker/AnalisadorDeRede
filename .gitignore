@@ -40,3 +40,8 @@ device_history/
 *.bak
 *.backup
 *~
+
+# PyInstaller
+build/
+dist/
+*.spec
