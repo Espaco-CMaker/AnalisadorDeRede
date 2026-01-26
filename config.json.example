@@ -1,0 +1,5 @@
+{
+  "ping_attempts": 4,
+  "scan_interval": 60,
+  "device_nicknames": {}
+}
