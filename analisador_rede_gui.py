@@ -67,6 +67,7 @@ try:
         obter_netbios,
         escanear_portas,
         run_cmd_capture,
+        verificar_online_arp_tcp,
     )
 except Exception as exc:  # fallback defensivo
     raise SystemExit(f"Falha ao importar analisador_rede: {exc}")
@@ -1683,7 +1684,9 @@ class NetworkAnalyzerApp:
                 
                 # Extrai valor numérico e armazena no histórico com timestamp
                 ms_valor = self._extrair_ms_do_ping(ping)
-                status_icon = "ONLINE" if ms_valor is not None else "OFFLINE"
+                online_arp_tcp, metodo = verificar_online_arp_tcp(ip_addr)
+                status_bool = (ms_valor is not None) or online_arp_tcp
+                status_icon = "ONLINE" if status_bool else "OFFLINE"
                 if ms_valor is not None:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     with self.ping_history_lock:

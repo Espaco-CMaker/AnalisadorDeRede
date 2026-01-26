@@ -712,6 +712,79 @@ def calcular_ping(ip, tentativas=10):
     except Exception as e:
         return "Erro"
 
+def verificar_na_tabela_arp(ip: str) -> bool:
+    """Verifica se o IP aparece na tabela ARP do sistema.
+    - Windows: usa 'arp -a'
+    - Linux/Mac: tenta 'ip neigh' e fallback para 'arp -n'
+    Retorna True se o IP estiver presente (indicando atividade recente na LAN).
+    """
+    try:
+        if platform.system() == "Windows":
+            texto = run_cmd_capture(["arp", "-a"]) or ""
+            # Linhas no formato: 192.168.1.10           aa-bb-cc-dd-ee-ff    dinâmico
+            padrao = r"(^|\s)(%s)(\s+)" % re.escape(ip)
+            return re.search(padrao, texto, re.MULTILINE) is not None
+        else:
+            # ip neigh show
+            texto = run_cmd_capture(["ip", "neigh", "show"]) or ""
+            # Ex.: 192.168.1.10 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE
+            if ip in texto:
+                return True
+            # fallback: arp -n
+            texto2 = run_cmd_capture(["arp", "-n"]) or ""
+            return ip in texto2
+    except Exception:
+        return False
+
+def verificar_portas_quick(ip: str, timeout: float = 0.3) -> bool:
+    """Verifica rapidamente se alguma porta comum está aberta via TCP.
+    Usa um conjunto pequeno de portas para reduzir custo.
+    Retorna True se alguma conexão for bem-sucedida.
+    """
+    portas = [80, 443, 22, 3389, 445, 135]
+    for porta in portas:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            resultado = sock.connect_ex((ip, porta))
+            sock.close()
+            if resultado == 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+def verificar_online_arp_tcp(ip: str, tentativas_ping_rapido: int = 0) -> tuple[bool, str]:
+    """Determina status online usando ARP + TCP (e opcionalmente um ping rápido).
+    Retorna (online_bool, metodo_str).
+    Ordem:
+      1. ARP na LAN (rápido, confiável em mesma subnet)
+      2. TCP portas comuns (serviços ativos)
+      3. (opcional) Ping rápido se solicitado
+    """
+    # 1) ARP
+    try:
+        if verificar_na_tabela_arp(ip):
+            return True, "ARP"
+    except Exception:
+        pass
+    # 2) TCP
+    try:
+        if verificar_portas_quick(ip):
+            return True, "TCP"
+    except Exception:
+        pass
+    # 3) Ping rápido (opcional)
+    if tentativas_ping_rapido and tentativas_ping_rapido > 0:
+        try:
+            texto = calcular_ping(ip, tentativas=tentativas_ping_rapido)
+            tempos = re.findall(r"(?:time|tempo)=(\d+\.?\d*)\s*ms", texto)
+            if tempos:
+                return True, "PING"
+        except Exception:
+            pass
+    return False, "NONE"
+
 # Dicionário de fabricantes OUI - Base expandida com centenas de fabricantes
 # Formato: "XX:XX:XX" -> "Fabricante"
 OUI_DATABASE = {
