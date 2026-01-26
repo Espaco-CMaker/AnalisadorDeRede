@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Arquivos de configuração sensíveis
+config.json
+oui_database.json
+oui_metadata.json
+
+# Logs e dados temporários
+*.log
+*.tmp
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Dados da rede (IPs, MACs, histórico)
+ping_history.json
+network_scan_*.json
+device_history/
+
+# Backups
+*.bak
+*.backup
+*~

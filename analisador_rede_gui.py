@@ -449,14 +449,36 @@ class NetworkAnalyzerApp:
             self.log(f"Erro ao copiar: {e}")
     
     def _on_edit_name(self, event):
-        """Edita o nome do dispositivo inline (duplo-clique na coluna 'nome')"""
+        """Duplo-clique: edita nome (coluna 4) ou copia valor de outras colunas"""
         item = self.tree.identify("item", event.x, event.y)
         column = self.tree.identify_column(event.x)
         
-        if not item or column != "#4":  # Coluna 4 é "nome" (editável)
+        if not item:
             return
         
         values = self.tree.item(item, 'values')
+        
+        # Se NÃO for coluna "nome" (#4), copia o valor da célula
+        if column != "#4":
+            try:
+                # Mapeia número da coluna para índice
+                column_index = int(column.replace("#", "")) - 1
+                if 0 <= column_index < len(values):
+                    valor = str(values[column_index])
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(valor)
+                    
+                    # Atualiza status e log
+                    self.status_var.set(f"✓ Copiado: {valor[:50]}")
+                    self.log(f"Copiado: {valor}")
+                    
+                    # Remove status após 2 segundos
+                    self.root.after(2000, lambda: self.status_var.set("Pronto"))
+            except Exception as e:
+                self.log(f"Erro ao copiar: {e}")
+            return
+        
+        # Se for coluna "nome" (#4), edita o nome
         if len(values) < 3:
             return
         
