@@ -497,13 +497,28 @@ def identificar_multiplos_equipamentos(macs: Dict[str, str]) -> Dict[str, Identi
 
 
 def run_cmd_capture(cmd, timeout=None):
-    """Executa um comando e retorna stdout como texto com decodificação robusta (Windows)."""
+    """Executa um comando e retorna stdout como texto, sem abrir janelas no Windows."""
     try:
+        startupinfo = None
+        creationflags = 0
+        if platform.system() == "Windows":
+            try:
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+                creationflags = subprocess.CREATE_NO_WINDOW
+            except Exception:
+                # Caso alguma flag não esteja disponível, segue sem elas
+                startupinfo = None
+                creationflags = 0
+
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout
+            timeout=timeout,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
         )
         data = result.stdout
         # Tenta decodificar em diferentes encodings comuns do Windows
@@ -597,7 +612,7 @@ def fazer_arp_scan(ip_local, mascara):
                     ip_obj = ipaddress.IPv4Address(ip)
                     # Filtra broadcast (.255) e endereço de rede (.0)
                     if ip_obj in rede and ip != endereco_broadcast and ip != endereco_rede:
-                        dispositivos[ip] = mac.replace("-", ":")
+                        dispositivos[ip] = mac.replace("-", ":").upper()
                 except:
                     pass
             
@@ -615,7 +630,26 @@ def fazer_arp_scan(ip_local, mascara):
                     if ip_alvo == endereco_broadcast:
                         continue
                     try:
-                        subprocess.run(["ping", "-n", "1", "-w", "100", ip_alvo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1)
+                        # Executa ping sem abrir janelas de console no Windows
+                        startupinfo = None
+                        creationflags = 0
+                        if platform.system() == "Windows":
+                            try:
+                                startupinfo = subprocess.STARTUPINFO()
+                                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                                startupinfo.wShowWindow = 0
+                                creationflags = subprocess.CREATE_NO_WINDOW
+                            except Exception:
+                                startupinfo = None
+                                creationflags = 0
+                        subprocess.run(
+                            ["ping", "-n", "1", "-w", "100", ip_alvo],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=1,
+                            startupinfo=startupinfo,
+                            creationflags=creationflags,
+                        )
                     except:
                         pass
                 
@@ -629,7 +663,7 @@ def fazer_arp_scan(ip_local, mascara):
                         ip_obj = ipaddress.IPv4Address(ip)
                         # Filtra endereço de broadcast e endereço de rede
                         if ip_obj in rede and ip != endereco_broadcast and ip != str(rede.network_address):
-                            dispositivos[ip] = mac.replace("-", ":")
+                            dispositivos[ip] = mac.replace("-", ":").upper()
                     except:
                         pass
         
