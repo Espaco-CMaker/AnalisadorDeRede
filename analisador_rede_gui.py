@@ -105,6 +105,7 @@ class NetworkAnalyzerApp:
 
         # Carrega configurações do arquivo
         config = self._load_config()
+        self.admin_tip_shown = bool(config.get("admin_tip_shown", False))
         self._load_nicknames()  # Carrega apelidos de dispositivos
         
         # Inicializa banco OUI (fabricantes) - carrega do cache local
@@ -166,6 +167,9 @@ class NetworkAnalyzerApp:
         self._build_macs_tab()
         self._build_config_tab()
         self._build_logs_tab()
+
+        # Recomenda execução como administrador (uma vez)
+        self.root.after(800, self._maybe_show_admin_tip)
 
     def _build_devices_tab(self):
         top_frame = ttk.Frame(self.tab_devices)
@@ -301,6 +305,18 @@ class NetworkAnalyzerApp:
         
         # Inicia scan automaticamente
         self.root.after(500, self.start_scan)
+
+    def _maybe_show_admin_tip(self):
+        try:
+            if os.name == 'nt' and not getattr(self, 'admin_tip_shown', False):
+                messagebox.showinfo(
+                    "Recomendação",
+                    "Para melhor descoberta de dispositivos e desempenho, execute este aplicativo como Administrador no Windows."
+                )
+                self.admin_tip_shown = True
+                self._save_config()
+        except Exception:
+            pass
 
     def _build_macs_tab(self):
         frame = ttk.Frame(self.tab_macs)
@@ -925,6 +941,7 @@ class NetworkAnalyzerApp:
             "device_nicknames": {},
             "graph_sash_position": 650,
             "history_hours": 24,
+            "admin_tip_shown": False,
         }
         try:
             if os.path.exists(self.config_file):
@@ -942,6 +959,8 @@ class NetworkAnalyzerApp:
                         config["graph_sash_position"] = default_config["graph_sash_position"]
                     if "history_hours" not in config:
                         config["history_hours"] = default_config["history_hours"]
+                    if "admin_tip_shown" not in config:
+                        config["admin_tip_shown"] = default_config["admin_tip_shown"]
                     return config
         except Exception as e:
             print(f"Erro ao carregar config: {e}")
@@ -962,7 +981,8 @@ class NetworkAnalyzerApp:
                 "scan_interval": self.scan_interval.get(),
                 "history_hours": self.history_hours.get(),
                 "device_nicknames": self.device_nicknames,
-                "graph_sash_position": getattr(self, 'graph_sash_position', 650)
+                "graph_sash_position": getattr(self, 'graph_sash_position', 650),
+                "admin_tip_shown": bool(getattr(self, 'admin_tip_shown', False)),
             }
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
@@ -1019,8 +1039,14 @@ class NetworkAnalyzerApp:
             valor = self.graph_values[x_index]
             timestamp = self.graph_timestamps[x_index] if x_index < len(self.graph_timestamps) else "N/A"
             
-            # Formata a exibição
-            tooltip_text = f"Hora: {timestamp} | Ping: {valor:.2f}ms"
+            # Formata a exibição (timeout vs valor)
+            if valor is None:
+                tooltip_text = f"Hora: {timestamp} | Ping: Timeout"
+            else:
+                try:
+                    tooltip_text = f"Hora: {timestamp} | Ping: {float(valor):.2f}ms"
+                except Exception:
+                    tooltip_text = f"Hora: {timestamp} | Ping: {valor}ms"
             self.graph_info.config(text=tooltip_text)
     
     def _on_tree_right_click(self, event):
@@ -1406,24 +1432,46 @@ class NetworkAnalyzerApp:
                 valores_ping.append(p)
                 timestamps.append("")
         
-        # Estatísticas
-        max_ping = max(valores_ping)
-        min_ping = min(valores_ping)
-        avg_ping = sum(valores_ping) / len(valores_ping)
+        # Converte None → NaN para cálculo/plot ignorando timeouts
+        y_vals = np.array([v if v is not None else np.nan for v in valores_ping], dtype=float)
+        numeric_mask = ~np.isnan(y_vals)
+        timeouts_mask = np.isnan(y_vals)
+        timeout_count = int(np.sum(timeouts_mask))
+        
+        # Estatísticas (ignorando timeouts)
+        has_numeric = bool(np.any(numeric_mask))
+        if has_numeric:
+            max_ping = float(np.nanmax(y_vals))
+            min_ping = float(np.nanmin(y_vals))
+            avg_ping = float(np.nanmean(y_vals))
+        else:
+            max_ping = min_ping = avg_ping = float('nan')
         
         # Cria índices para o eixo X
         x_vals = np.array(range(1, len(valores_ping) + 1))
-        y_vals = np.array(valores_ping)
         
-        # Desenha a linha principal de pings
-        self.ax.plot(x_vals, y_vals, color='#2196F3', linewidth=2, marker='o', 
-                    markersize=5, label='Ping (ms)', markerfacecolor='#2196F3', 
-                    markeredgecolor='#1976D2', markeredgewidth=1, alpha=0.8)
+        # Desenha a linha principal de pings (timeouts são NaN e o traço é interrompido)
+        self.ax.plot(
+            x_vals, y_vals,
+            color='#2196F3', linewidth=2, marker='o', markersize=5,
+            label='Ping (ms)', markerfacecolor='#2196F3', markeredgecolor='#1976D2',
+            markeredgewidth=1, alpha=0.8
+        )
+        
+        # Marca timeouts com pontos vermelhos
+        if timeout_count:
+            timeout_x = x_vals[timeouts_mask]
+            # Usa um valor visualmente destacado na base (sem afetar estatística)
+            self.ax.scatter(timeout_x, [0]*len(timeout_x), s=36, c='#D32F2F',
+                            marker='o', label='Timeout', zorder=6)
         
         # Curva de tendência (polyfit grau 2)
-        if len(valores_ping) >= 3:
+        if has_numeric and np.sum(numeric_mask) >= 3:
             try:
-                z = np.polyfit(x_vals, y_vals, 2)
+                # Usa apenas pontos válidos para regressão
+                x_num = x_vals[numeric_mask]
+                y_num = y_vals[numeric_mask]
+                z = np.polyfit(x_num, y_num, 2)
                 p = np.poly1d(z)
                 x_smooth = np.linspace(x_vals.min(), x_vals.max(), 100)
                 y_smooth = p(x_smooth)
@@ -1433,14 +1481,15 @@ class NetworkAnalyzerApp:
                 pass
         
         # Destaca o último ponto
-        if valores_ping:
+        if len(valores_ping) > 0 and valores_ping[-1] is not None:
             self.ax.plot(len(valores_ping), valores_ping[-1], color='#FF5722', marker='o', 
                         markersize=8, markeredgecolor='#E64A19', markeredgewidth=2, 
                         label='Último valor', zorder=5)
         
         # Linha de média
-        self.ax.axhline(y=avg_ping, color='#FFC107', linestyle=':', linewidth=2, 
-                       label=f'Média: {int(avg_ping)}ms', alpha=0.7)
+        if has_numeric:
+            self.ax.axhline(y=avg_ping, color='#FFC107', linestyle=':', linewidth=2, 
+                           label=f'Média: {int(avg_ping)}ms', alpha=0.7)
         
         # Configuração dos eixos com timestamps
         # Mostra apenas alguns timestamps para não poluir o gráfico
@@ -1460,7 +1509,7 @@ class NetworkAnalyzerApp:
         # Ajusta espaçamento
         self.fig.tight_layout()
         
-        # Armazena dados para tooltip
+        # Armazena dados para tooltip (mantém None para detectar timeout)
         self.graph_values = valores_ping
         self.graph_timestamps = timestamps
         
@@ -1468,9 +1517,14 @@ class NetworkAnalyzerApp:
         self.canvas.draw()
         
         # Atualiza informações
-        self.graph_info.config(
-            text=f"{ip_addr} | Min: {int(min_ping)}ms | Avg: {int(avg_ping)}ms | Max: {int(max_ping)}ms | Total: {len(valores_ping)} amostras"
-        )
+        if has_numeric:
+            self.graph_info.config(
+                text=f"{ip_addr} | Min: {int(min_ping)}ms | Avg: {int(avg_ping)}ms | Max: {int(max_ping)}ms | Total: {len(valores_ping)} amostras | Timeouts: {timeout_count}"
+            )
+        else:
+            self.graph_info.config(
+                text=f"{ip_addr} | Somente timeouts ({timeout_count}) nas últimas {len(valores_ping)} amostras"
+            )
 
     # ------------------------------------------------------------------
     # Logging e status
@@ -1520,6 +1574,10 @@ class NetworkAnalyzerApp:
         
         # Extrai valores de ping (compatível com tuplas (valor, timestamp))
         pings = [d[0] if isinstance(d, tuple) else d for d in dados]
+        # Remove timeouts (None) para não distorcer o sparkline
+        pings = [p for p in pings if p is not None]
+        if not pings:
+            return "timeouts"
         
         # Normaliza os valores para escala de 0-8 (altura dos caracteres)
         max_ping = max(pings)
@@ -1687,12 +1745,12 @@ class NetworkAnalyzerApp:
                 online_arp_tcp, metodo = verificar_online_arp_tcp(ip_addr)
                 status_bool = (ms_valor is not None) or online_arp_tcp
                 status_icon = "ONLINE" if status_bool else "OFFLINE"
-                if ms_valor is not None:
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    with self.ping_history_lock:
-                        self.ping_history.setdefault(ip_addr, []).append((ms_valor, timestamp))
-                    self._prune_history_by_hours()
-                    self._save_ping_history_throttled()
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Registra tanto sucesso quanto timeout no histórico
+                with self.ping_history_lock:
+                    self.ping_history.setdefault(ip_addr, []).append((ms_valor if ms_valor is not None else None, timestamp))
+                self._prune_history_by_hours()
+                self._save_ping_history_throttled()
                 
                 # Gera gráfico com histórico
                 historico = self._gerar_grafico_ping(ip_addr)

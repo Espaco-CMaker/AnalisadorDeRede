@@ -36,6 +36,9 @@ Duplo-clique na coluna MAC para dar um apelido persistente (salvo em config.json
 ### 3. Abrir Portas
 Clique direito na coluna SERVIÇOS para abrir serviços descobertos no navegador/aplicação
 
+### 4. Gráfico: Timeouts em vermelho
+Pontos de timeout são marcados com círculos vermelhos no gráfico para facilitar a identificação de perda de resposta.
+
 ## Instalação de Dependências---
 
 ## Funcionalidades Principais
@@ -216,7 +219,7 @@ Total de dispositivos encontrados: 5
 
 1. **Tempo de execução**: O programa pode levar 5-10 minutos, dependendo da quantidade de dispositivos e da velocidade da rede.
 
-2. **Privilégios**: No Windows, recomenda-se executar como Administrador. No Linux/macOS, use `sudo`.
+2. **Privilégios**: No Windows, recomenda-se executar como Administrador (uma mensagem de recomendação aparece ao abrir o app). No Linux/macOS, use `sudo`.
 
 3. **Firewall**: Alguns dispositivos podem estar configurados para não responder a ping, aparecendo como "❌ Sem resposta".
 

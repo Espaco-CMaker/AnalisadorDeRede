@@ -82,6 +82,7 @@ Os seguintes arquivos **ESTÃO** no GitHub:
 - Histórico persistente (24h configurável)
 - Estatísticas: Min, Máx, Média
 - Suporta até 168 horas de dados
+- Timeouts marcados por pontos vermelhos no gráfico
 
 #### 🏷️ **Tabela de MACs/Nomes**
 - Gerenciamento de apelidos persistentes
@@ -257,12 +258,12 @@ dist/analisador_rede_gui.exe
 - Filtros e buscas
 - Gráficos em tempo real
 - Importação/Exportação de dados
+ - Detecção ONLINE via combinação ARP + TCP + Ping (quando disponível)
 
 ### 🔄 Em Desenvolvimento
-- Método ARP + TCP para detecção mais precisa
-- Suporte a IPv6
-- Dashboard com estatísticas
-- Alertas automáticos
+ - Suporte a IPv6
+ - Dashboard com estatísticas
+ - Alertas automáticos
 
 ### 📋 Planejado
 - Comparação de múltiplas redes
