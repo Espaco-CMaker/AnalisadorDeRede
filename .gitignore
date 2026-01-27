@@ -41,6 +41,7 @@ device_history/
 *.txt
 !README.md
 !CHANGELOG.md
+!requirements.txt
 
 # Documentos sensíveis
 RESUMO_DADOS_SENSIVEIS.md
