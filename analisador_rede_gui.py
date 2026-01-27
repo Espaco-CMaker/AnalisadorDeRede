@@ -444,6 +444,7 @@ class NetworkAnalyzerApp:
         self.graph_scroll_pos = 1.0  # Posição atual do scroll (1.0 = fim, mostra últimos dados)
         self.graph_window_min = 10  # Mínimo de amostras (zoom in máximo)
         self.graph_window_max = 200  # Máximo de amostras (zoom out máximo)
+        self.graph_zoom_debounce_id = None  # Para debouncing do zoom com mousewheel
         
         # Frame para scrollbar horizontal
         scroll_frame = ttk.Frame(graph_frame)
@@ -1316,7 +1317,7 @@ class NetworkAnalyzerApp:
         self.root.after(0, self._render_graph_fast)
     
     def _on_graph_mousewheel(self, event):
-        """Mouse wheel agora faz ZOOM (aumenta/diminui quantidade de amostras visíveis)"""
+        """Mouse wheel agora faz ZOOM (aumenta/diminui quantidade de amostras visíveis) - COM DEBOUNCING"""
         if not self.selected_ip:
             return
         
@@ -1332,8 +1333,12 @@ class NetworkAnalyzerApp:
         # Aplica limites
         self.graph_window_size = max(self.graph_window_min, min(self.graph_window_max, new_window_size))
         
-        # Renderiza imediatamente (super rápido, sem recalcular)
-        self.root.after(0, self._render_graph_fast)
+        # Cancela renderização anterior se houver
+        if self.graph_zoom_debounce_id is not None:
+            self.root.after_cancel(self.graph_zoom_debounce_id)
+        
+        # Agenda renderização com debounce de 20ms (bem rápido, mas agrupa múltiplos eventos)
+        self.graph_zoom_debounce_id = self.root.after(20, self._render_graph_fast)
         return "break"  # Previne propagação do evento
     
     def _render_graph_fast(self):
