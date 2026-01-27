@@ -36,6 +36,15 @@ ping_history.json
 network_scan_*.json
 device_history/
 
+# Documentos (mantém apenas README/CHANGELOG no repo)
+*.md
+*.txt
+!README.md
+!CHANGELOG.md
+
+# Documentos sensíveis
+RESUMO_DADOS_SENSIVEIS.md
+
 # Métricas de desenvolvimento (não compartilhar)
 DEV_METRICS.md
 TEMPO_DESENVOLVIMENTO.md
