@@ -616,19 +616,24 @@ def fazer_arp_scan(ip_local, mascara):
                 except:
                     pass
             
+            print(f"[DEBUG] Cache ARP inicial: {len(dispositivos)} dispositivos encontrados")
+            
             # Se encontrou poucos, faz ping broadcast para popular ARP
             if len(dispositivos) < 3:
-                print("[INFO] Descobrindo dispositivos na rede (aguarde ~30s)...")
+                print("[INFO] Descobrindo dispositivos na rede (aguarde ~240s)...")
                 
                 # Calcula o endereço de broadcast para filtrar
                 endereco_broadcast = str(rede.broadcast_address)
                 
-                # Faz ping para endereços da rede (excluindo broadcast)
-                for host in list(rede.hosts())[:255]:
-                    ip_alvo = str(host)
-                    # Ignora o endereço de broadcast
+                # Contador de sucessos
+                import threading
+                contador_sucesso = [0]
+                contador_lock = threading.Lock()
+                
+                # Função para fazer ping em paralelo
+                def ping_host(ip_alvo):
                     if ip_alvo == endereco_broadcast:
-                        continue
+                        return False
                     try:
                         # Executa ping sem abrir janelas de console no Windows
                         startupinfo = None
@@ -642,20 +647,41 @@ def fazer_arp_scan(ip_local, mascara):
                             except Exception:
                                 startupinfo = None
                                 creationflags = 0
-                        subprocess.run(
-                            ["ping", "-n", "1", "-w", "100", ip_alvo],
+                        resultado = subprocess.run(
+                            ["ping", "-n", "1", "-w", "4000", ip_alvo],
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
-                            timeout=1,
+                            timeout=12,
                             startupinfo=startupinfo,
                             creationflags=creationflags,
                         )
+                        if resultado.returncode == 0:
+                            with contador_lock:
+                                contador_sucesso[0] += 1
+                            return True
                     except:
                         pass
+                    return False
+                
+                # Faz ping paralelo em todos os hosts da rede (sem limite de 255)
+                hosts_list = list(rede.hosts())
+                print(f"[INFO] Pingando {len(hosts_list)} endereços possíveis...")
+                print(f"[DEBUG] Timeout por ping: 4000ms (subprocess: 12s)")
+                print(f"[DEBUG] Workers paralelos: 100")
+                
+                # Usa ThreadPoolExecutor para ping paralelo (mais rápido)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+                    futures = [executor.submit(ping_host, str(host)) for host in hosts_list]
+                    # Aguarda conclusão com timeout
+                    done, not_done = concurrent.futures.wait(futures, timeout=360)
+                    print(f"[DEBUG] Pings concluídos: {len(done)}/{len(futures)}")
+                    print(f"[DEBUG] Pings com sucesso: {contador_sucesso[0]}")
                 
                 # Re-executa arp -a
+                print("[INFO] Lendo cache ARP atualizado...")
                 texto_arp = run_cmd_capture(["arp", "-a"]) or ""
                 matches = re.findall(padrao, texto_arp)
+                print(f"[DEBUG] Total de entradas no ARP: {len(matches)}")
                 dispositivos = {}
                 endereco_broadcast = str(rede.broadcast_address)
                 for ip, mac in matches:
@@ -666,6 +692,7 @@ def fazer_arp_scan(ip_local, mascara):
                             dispositivos[ip] = mac.replace("-", ":").upper()
                     except:
                         pass
+                print(f"[INFO] Dispositivos encontrados após scan: {len(dispositivos)}")
         
         else:
             # Linux/Mac - usa arp-scan

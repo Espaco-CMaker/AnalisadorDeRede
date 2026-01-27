@@ -50,6 +50,14 @@ import re  # para gráfico e processamento
 import webbrowser  # para abrir URLs
 import csv  # para exportação CSV
 
+# psutil para métricas do sistema
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("[WARN] psutil não instalado. Métricas de sistema desabilitadas.")
+
 # Matplotlib para gráficos profissionais
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -99,6 +107,36 @@ class NetworkAnalyzerApp:
         
         # IP selecionado para gráfico
         self.selected_ip = None
+        
+        # Thread para renderização do gráfico (não bloqueia UI)
+        self.graph_render_thread = None
+        self.graph_render_lock = threading.Lock()
+        self.pending_graph_render = None
+        self.graph_computed_data = None  # Dados pré-computados para renderizar
+        
+        # Debounce para scroll fluido
+        self.graph_scroll_timer = None
+        
+        # Controles de drag do gráfico (pan com mouse)
+        self.graph_dragging = False
+        self.graph_drag_start_x = None
+        self.graph_drag_start_scroll = None
+        
+        # Processo atual para métricas
+        self.process = psutil.Process() if PSUTIL_AVAILABLE else None
+        self.app_start_time = time.time()
+        self.system_stats_labels = {}
+        
+        # Otimização de performance
+        self.resize_columns_timer = None  # Debounce para redimensionar colunas
+        
+        # Otimização de performance
+        self.resize_columns_timer = None  # Debounce para redimensionar colunas
+        self.last_metrics_update = 0  # Controla frequência de atualização
+        
+        # Processo atual para métricas
+        self.process = psutil.Process() if PSUTIL_AVAILABLE else None
+        self.system_stats_labels = {}
 
         # Gateway atual da rede
         self.current_gateway = "-"
@@ -116,8 +154,8 @@ class NetworkAnalyzerApp:
         except Exception as e:
             print(f"[AVISO] Erro ao inicializar banco OUI: {e}")
         
-        # Configurações
-        self.ping_attempts = tk.IntVar(value=config.get("ping_attempts", 4))
+        # Configurações (OTIMIZADO: ping_attempts reduzido para 2)
+        self.ping_attempts = tk.IntVar(value=config.get("ping_attempts", 2))
         self.scan_interval = tk.IntVar(value=config.get("scan_interval", 60))  # segundos
         self.history_hours = tk.IntVar(value=config.get("history_hours", 24))  # horas de histórico persistente
         self.graph_sash_position = config.get("graph_sash_position", 650)  # Posição do divisor do gráfico
@@ -140,11 +178,11 @@ class NetworkAnalyzerApp:
         # Salva configuração ao fechar
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
-        # Inicia loop de processamento de fila
-        self.root.after(200, self._process_queue)
+        # Inicia loop de processamento de fila (600ms para performance)
+        self.root.after(600, self._process_queue)
         
-        # Atualiza tabela de MACs periodicamente (a cada 5 segundos)
-        self.root.after(5000, self._update_macs_table_periodically)
+        # Atualiza tabela de MACs periodicamente (a cada 10 segundos para performance)
+        self.root.after(10000, self._update_macs_table_periodically)
 
     # ------------------------------------------------------------------
     # UI
@@ -238,6 +276,125 @@ class NetworkAnalyzerApp:
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
         
+        # Barra de status do sistema (altura fixa)
+        status_bar = ttk.Frame(table_frame, relief=tk.SUNKEN, borderwidth=1)
+        status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        
+        # Labels para métricas do sistema
+        self.lbl_cpu = ttk.Label(status_bar, text="CPU: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_cpu.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_memory = ttk.Label(status_bar, text="RAM: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_memory.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_threads = ttk.Label(status_bar, text="Threads: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_threads.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_devices = ttk.Label(status_bar, text="Dispositivos: 0", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_devices.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_uptime = ttk.Label(status_bar, text="Uptime: 0s", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_uptime.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_queue = ttk.Label(status_bar, text="Fila: 0", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_queue.pack(side=tk.LEFT, padx=5)
+        
+        # Inicia atualização periódica da barra de status (a cada 1 segundo)
+        self.root.after(1000, self._update_system_stats)
+        
+        # Barra de status do sistema (altura fixa)
+        status_bar = ttk.Frame(table_frame, relief=tk.SUNKEN, borderwidth=1)
+        status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        
+        # Labels para métricas do sistema
+        self.lbl_cpu = ttk.Label(status_bar, text="CPU: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_cpu.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_memory = ttk.Label(status_bar, text="RAM: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_memory.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_threads = ttk.Label(status_bar, text="Threads: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_threads.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_devices = ttk.Label(status_bar, text="Dispositivos: 0", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_devices.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_uptime = ttk.Label(status_bar, text="Uptime: 0s", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_uptime.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_queue = ttk.Label(status_bar, text="Fila: 0", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_queue.pack(side=tk.LEFT, padx=5)
+        
+        # Inicia atualização periódica da barra de status (a cada 1 segundo)
+        self.root.after(1000, self._update_system_stats)
+        
+        # Barra de status do sistema (altura fixa)
+        status_bar = ttk.Frame(table_frame, relief=tk.SUNKEN, borderwidth=1)
+        status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        
+        # Labels para métricas do sistema
+        self.lbl_cpu = ttk.Label(status_bar, text="CPU: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_cpu.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_memory = ttk.Label(status_bar, text="RAM: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_memory.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_threads = ttk.Label(status_bar, text="Threads: --", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_threads.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_devices = ttk.Label(status_bar, text="Dispositivos: 0", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_devices.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_uptime = ttk.Label(status_bar, text="Uptime: 0s", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_uptime.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
+        
+        self.lbl_queue = ttk.Label(status_bar, text="Fila: 0", relief=tk.FLAT, padding=(5, 2))
+        self.lbl_queue.pack(side=tk.LEFT, padx=5)
+        
+        # Armazena referências
+        self.system_stats_labels = {
+            'cpu': self.lbl_cpu,
+            'memory': self.lbl_memory,
+            'threads': self.lbl_threads,
+            'devices': self.lbl_devices,
+            'uptime': self.lbl_uptime,
+            'queue': self.lbl_queue
+        }
+        
+        # Inicia atualização periódica da barra de status (a cada 3 segundos para performance)
+        self.app_start_time = time.time()
+        self.root.after(3000, self._update_system_stats)
+        
         # Adiciona painel de gráfico à direita com matplotlib
         graph_frame = ttk.LabelFrame(self.paned_window, text="Gráfico de Ping (Clique em um IP)")
         
@@ -267,7 +424,12 @@ class NetworkAnalyzerApp:
         
         self.btn_browser = ttk.Button(button_frame, text="🌐 Abrir no Browser", 
                                       command=self._open_browser, state=tk.DISABLED)
-        self.btn_browser.pack(fill=tk.X)
+        self.btn_browser.pack(fill=tk.X, pady=(0, 3))
+        
+        # Botão para zerar histórico do dispositivo selecionado
+        self.btn_clear_device_history = ttk.Button(button_frame, text="🗑️ Zerar Histórico", 
+                                                   command=self._clear_device_history, state=tk.DISABLED)
+        self.btn_clear_device_history.pack(fill=tk.X)
         
         # Cria figura matplotlib
         self.fig = Figure(figsize=(4.5, 2.8), dpi=100)
@@ -275,14 +437,26 @@ class NetworkAnalyzerApp:
         self.fig.patch.set_facecolor('#f0f0f0')
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
         
-        # Adiciona toolbar de navegação (zoom, pan, home, save)
-        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
-        toolbar_frame = ttk.Frame(graph_frame)
-        toolbar_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
-        toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
-        toolbar.update()
+        # Controles da janela deslizante do gráfico
+        self.graph_window_size = 30  # Quantidade de amostras visíveis
+        self.graph_scroll_pos = 1.0  # Posição atual do scroll (1.0 = fim, mostra últimos dados)
+        self.graph_window_min = 10  # Mínimo de amostras (zoom in máximo)
+        self.graph_window_max = 200  # Máximo de amostras (zoom out máximo)
+        
+        # Frame para scrollbar horizontal
+        scroll_frame = ttk.Frame(graph_frame)
+        scroll_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        
+        # Scrollbar horizontal para navegar no gráfico
+        self.graph_scrollbar = ttk.Scrollbar(scroll_frame, orient=tk.HORIZONTAL, command=self._on_graph_scroll)
+        self.graph_scrollbar.pack(fill=tk.X, side=tk.LEFT, expand=True)
+        
+        # Bind mouse wheel para scroll fluido
+        self.canvas.get_tk_widget().bind("<MouseWheel>", self._on_graph_mousewheel)
+        self.canvas.get_tk_widget().bind("<Button-4>", self._on_graph_mousewheel)  # Linux scroll up
+        self.canvas.get_tk_widget().bind("<Button-5>", self._on_graph_mousewheel)  # Linux scroll down
         
         # Variáveis para armazenar dados do gráfico para tooltip
         self.graph_data = None  # Será preenchido em _draw_graph
@@ -291,6 +465,11 @@ class NetworkAnalyzerApp:
         
         # Vincular evento de movimento do mouse ao canvas para tooltip
         self.canvas.mpl_connect('motion_notify_event', self._on_graph_hover)
+        
+        # Vincular eventos para arrastar gráfico (pan)
+        self.canvas.mpl_connect('button_press_event', self._on_graph_press)
+        self.canvas.mpl_connect('button_release_event', self._on_graph_release)
+        self.canvas.mpl_connect('motion_notify_event', self._on_graph_drag)
         
         # Label para informações
         self.graph_info = ttk.Label(graph_frame, text="Selecione um IP para ver o gráfico", justify="center")
@@ -528,8 +707,62 @@ class NetworkAnalyzerApp:
     def _update_macs_table_periodically(self):
         """Atualiza a tabela de MACs periodicamente"""
         self._refresh_mac_table()
-        # Reagenda para 5 segundos
-        self.root.after(5000, self._update_macs_table_periodically)
+        # Reagenda para 10 segundos (performance)
+        self.root.after(10000, self._update_macs_table_periodically)
+    
+    def _update_system_stats(self):
+        """Atualiza as métricas do sistema na barra de status"""
+        try:
+            if PSUTIL_AVAILABLE and self.process:
+                # CPU usage da aplicação - normalizado por número de cores
+                cpu_percent_raw = self.process.cpu_percent(interval=0.1)
+                num_cores = psutil.cpu_count()
+                # Normaliza para 0-100% considerando múltiplos cores
+                cpu_percent_normalized = min(100.0, (cpu_percent_raw / num_cores) if num_cores else cpu_percent_raw)
+                self.lbl_cpu.config(text=f"CPU: {cpu_percent_normalized:.1f}% ({num_cores}c)")
+                
+                # Memória da aplicação
+                mem_info = self.process.memory_info()
+                mem_mb = mem_info.rss / 1024 / 1024
+                self.lbl_memory.config(text=f"RAM: {mem_mb:.1f} MB")
+                
+                # Threads ativas
+                num_threads = self.process.num_threads()
+                self.lbl_threads.config(text=f"Threads: {num_threads}")
+            else:
+                # psutil não disponível
+                thread_count = threading.active_count()
+                self.lbl_cpu.config(text="CPU: N/A")
+                self.lbl_memory.config(text="RAM: N/A")
+                self.lbl_threads.config(text=f"Threads: {thread_count}")
+            
+            # Dispositivos monitorados
+            device_count = len(self.table_ips)
+            self.lbl_devices.config(text=f"Dispositivos: {device_count}")
+            
+            # Uptime da aplicação
+            uptime_seconds = int(time.time() - self.app_start_time)
+            hours = uptime_seconds // 3600
+            minutes = (uptime_seconds % 3600) // 60
+            seconds = uptime_seconds % 60
+            if hours > 0:
+                uptime_str = f"{hours}h {minutes}m"
+            elif minutes > 0:
+                uptime_str = f"{minutes}m {seconds}s"
+            else:
+                uptime_str = f"{seconds}s"
+            self.lbl_uptime.config(text=f"Uptime: {uptime_str}")
+            
+            # Tamanho da fila de eventos
+            queue_size = self.queue.qsize()
+            self.lbl_queue.config(text=f"Fila: {queue_size}")
+            
+        except Exception:
+            # Silencia erros de métricas para não poluir logs
+            pass
+        
+        # Reagenda atualização a cada 3 segundos (otimiza performance)
+        self.root.after(3000, self._update_system_stats)
     
     def _apply_macs_filter(self):
         """Aplica os filtros na tabela de MACs"""
@@ -1014,7 +1247,8 @@ class NetworkAnalyzerApp:
                 ip_addr = values[2]  # IP agora está na coluna 3
                 self.selected_ip = ip_addr  # Armazena IP selecionado
                 self.btn_browser.config(state=tk.NORMAL)  # Habilita botão
-                self._draw_graph(ip_addr)
+                self.btn_clear_device_history.config(state=tk.NORMAL)  # Habilita botão de zerar histórico
+                self._draw_graph_threaded(ip_addr)
     
     def _open_browser(self):
         """Abre o IP selecionado no browser"""
@@ -1025,6 +1259,170 @@ class NetworkAnalyzerApp:
                 self.log(f"Abrindo {url} no browser...")
             except Exception as e:
                 messagebox.showerror("Erro", f"Não foi possível abrir o browser: {e}")
+    
+    def _clear_device_history(self):
+        """Zera o histórico de ping do dispositivo selecionado"""
+        if not self.selected_ip:
+            return
+        
+        # Confirma ação com o usuário
+        resposta = messagebox.askyesno(
+            "Confirmar Limpeza",
+            f"Deseja realmente zerar o histórico de ping do dispositivo {self.selected_ip}?\n\nEsta ação não pode ser desfeita."
+        )
+        
+        if resposta:
+            # Remove o histórico do IP
+            with self.ping_history_lock:
+                if self.selected_ip in self.ping_history:
+                    count = len(self.ping_history[self.selected_ip])
+                    self.ping_history[self.selected_ip] = []
+                    self.log(f"Histórico de {self.selected_ip} zerado ({count} registros removidos)")
+                else:
+                    self.log(f"Nenhum histórico encontrado para {self.selected_ip}")
+            
+            # Salva alterações
+            self._save_ping_history()
+            
+            # Redesenha o gráfico (mostrará mensagem "Nenhum dado")
+            self._draw_graph_threaded(self.selected_ip)
+            
+            # Atualiza o gráfico unicode na tabela
+            if self.selected_ip in self.table_ips:
+                item_id = self.table_ips[self.selected_ip]
+                old_values = self.tree.item(item_id, 'values')
+                if len(old_values) >= 13:
+                    # Atualiza apenas as colunas do gráfico e histórico
+                    new_values = list(old_values)
+                    new_values[10] = "▪"  # gráfico
+                    new_values[11] = "sem dados"  # histórico
+                    self.tree.item(item_id, values=new_values)
+    
+    def _on_graph_scroll(self, *args):
+        """Callback do scrollbar - scroll FLUIDO sem recalcular gráfico"""
+        if args[0] == 'moveto':
+            # Converte posição fracionária para índice
+            self.graph_scroll_pos = max(0.0, min(1.0, float(args[1])))
+        elif args[0] in ['scroll']:
+            # Scroll incremental (setas do scrollbar)
+            delta = int(args[1])
+            pings = self._get_recent_pings(self.selected_ip) if self.selected_ip else []
+            if len(pings) > self.graph_window_size:
+                max_scroll = len(pings) - self.graph_window_size
+                step_size = 1.0 / max_scroll
+                self.graph_scroll_pos = max(0.0, min(1.0, self.graph_scroll_pos + (delta * step_size * 3)))
+        
+        # Renderiza imediatamente sem debounce (scroll já é rápido)
+        self.root.after(0, self._render_graph_fast)
+    
+    def _on_graph_mousewheel(self, event):
+        """Mouse wheel agora faz ZOOM (aumenta/diminui quantidade de amostras visíveis)"""
+        if not self.selected_ip:
+            return
+        
+        # Detecta direção do scroll
+        if event.num == 5 or event.delta < 0:  # Scroll down = ZOOM OUT (mais amostras)
+            zoom_factor = 1.1
+        else:  # Scroll up = ZOOM IN (menos amostras)
+            zoom_factor = 0.9
+        
+        # Calcula novo tamanho da janela
+        new_window_size = int(self.graph_window_size * zoom_factor)
+        
+        # Aplica limites
+        self.graph_window_size = max(self.graph_window_min, min(self.graph_window_max, new_window_size))
+        
+        # Renderiza imediatamente (super rápido, sem recalcular)
+        self.root.after(0, self._render_graph_fast)
+        return "break"  # Previne propagação do evento
+    
+    def _render_graph_fast(self):
+        """Renderiza apenas a janela visível (scroll fluido) - NÃO recalcula dados"""
+        if self.graph_computed_data is None:
+            return
+        
+        data = self.graph_computed_data
+        ip_addr = data['ip_addr']
+        y_vals_all = data['y_vals_all'] if 'y_vals_all' in data else data['y_vals']
+        total_amostras = data['total_amostras']
+        timestamps_all = data['timestamps_all'] if 'timestamps_all' in data else data['timestamps']
+        
+        # Calcula índices da janela visível
+        if total_amostras > self.graph_window_size:
+            max_scroll = total_amostras - self.graph_window_size
+            start_idx = int(self.graph_scroll_pos * max_scroll)
+            end_idx = start_idx + self.graph_window_size
+            
+            y_vals = y_vals_all[start_idx:end_idx]
+            timestamps = timestamps_all[start_idx:end_idx]
+            scroll_pos = self.graph_scroll_pos
+            visible_frac = self.graph_window_size / total_amostras
+        else:
+            y_vals = y_vals_all
+            timestamps = timestamps_all
+            scroll_pos = 0
+            visible_frac = 1.0
+        
+        # Limpa e renderiza apenas a linha (sem cálculos pesados)
+        self.ax.clear()
+        x_vals = np.arange(len(y_vals))
+        
+        # Desenha linha principal
+        numeric_mask = ~np.isnan(y_vals)
+        timeouts_mask = np.isnan(y_vals)
+        
+        self.ax.plot(
+            x_vals, y_vals,
+            color='#2196F3', linewidth=2, marker='o', markersize=5,
+            label='Ping (ms)', markerfacecolor='#2196F3', markeredgecolor='#1976D2',
+            markeredgewidth=1, alpha=0.8
+        )
+        
+        # Marca timeouts
+        timeout_count = int(np.sum(timeouts_mask))
+        if timeout_count:
+            timeout_x = x_vals[timeouts_mask]
+            for tx in timeout_x:
+                self.ax.axvline(x=tx, color='#D32F2F', linewidth=3, alpha=0.7, linestyle='-', zorder=1)
+            if len(timeout_x) > 0:
+                self.ax.axvline(x=timeout_x[0], color='#D32F2F', linewidth=3, alpha=0.7, label='Timeout', zorder=1)
+        
+        # Linha de média
+        if np.any(numeric_mask):
+            avg_ping = float(np.nanmean(y_vals))
+            self.ax.axhline(y=avg_ping, color='#FFC107', linestyle=':', linewidth=2, 
+                           label=f'Média: {int(avg_ping)}ms', alpha=0.7)
+        
+        # Configura eixos (mínimo de processamento)
+        if len(timestamps) > 0:
+            step = max(1, len(timestamps) // 5)  # Menos labels para ser mais rápido
+            x_ticks = list(range(0, len(timestamps), step))
+            if len(timestamps) - 1 not in x_ticks:
+                x_ticks.append(len(timestamps) - 1)
+            x_ticks = sorted(set(x_ticks))
+            x_ticks = [t for t in x_ticks if t < len(timestamps)]
+            x_labels = [timestamps[i] for i in x_ticks]
+        else:
+            x_ticks = []
+            x_labels = []
+        
+        self.ax.set_xticks(x_ticks)
+        self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
+        self.ax.set_ylabel('Latência (ms)', fontsize=9, color='#333')
+        self.ax.set_title(f'Ping - {ip_addr}', fontsize=11, fontweight='bold')
+        self.ax.grid(True, alpha=0.3, linestyle=':')
+        self.ax.set_facecolor('#fafafa')
+        self.ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+        
+        # Atualiza scrollbar
+        self.graph_scrollbar.set(scroll_pos, scroll_pos + visible_frac)
+        
+        # Armazena dados para tooltip
+        self.graph_values = list(y_vals)
+        self.graph_timestamps = timestamps
+        
+        # Redesenha (super rápido!)
+        self.canvas.draw_idle()
     
     def _on_graph_hover(self, event):
         """Mostra tooltip ao passar o mouse sobre um ponto no gráfico"""
@@ -1055,6 +1453,58 @@ class NetworkAnalyzerApp:
                 except Exception:
                     tooltip_text = f"Hora: {timestamp} | Ping: {valor}ms"
             self.graph_info.config(text=tooltip_text)
+    
+    def _on_graph_press(self, event):
+        """Inicia o arrasto do gráfico (pan) com o mouse"""
+        if event.inaxes != self.ax or event.button != 1:  # Apenas botão esquerdo
+            return
+        
+        # Verifica se há dados para fazer scroll
+        if self.graph_computed_data is None:
+            return
+        
+        total_amostras = self.graph_computed_data.get('total_amostras', 0)
+        if total_amostras <= self.graph_window_size:
+            return  # Não precisa scroll
+        
+        # Inicia drag
+        self.graph_dragging = True
+        self.graph_drag_start_x = event.xdata
+        self.graph_drag_start_scroll = self.graph_scroll_pos
+        self.canvas.get_tk_widget().config(cursor="fleur")  # Cursor de movimento
+    
+    def _on_graph_release(self, event):
+        """Finaliza o arrasto do gráfico"""
+        if self.graph_dragging:
+            self.graph_dragging = False
+            self.graph_drag_start_x = None
+            self.graph_drag_start_scroll = None
+            self.canvas.get_tk_widget().config(cursor="")  # Cursor normal
+    
+    def _on_graph_drag(self, event):
+        """Arrasta o gráfico horizontalmente (pan fluido)"""
+        if not self.graph_dragging or event.inaxes != self.ax:
+            return
+        
+        if event.xdata is None or self.graph_drag_start_x is None:
+            return
+        
+        # Calcula delta do movimento (em pontos de dados)
+        delta_x = event.xdata - self.graph_drag_start_x
+        
+        # Converte delta para posição de scroll (invertido para comportamento natural)
+        total_amostras = self.graph_computed_data.get('total_amostras', 0)
+        max_scroll = total_amostras - self.graph_window_size
+        
+        # Quanto maior o movimento, mais rápido o scroll (sensibilidade ajustável)
+        scroll_delta = -delta_x / self.graph_window_size
+        
+        # Atualiza posição de scroll
+        new_scroll = self.graph_drag_start_scroll + scroll_delta
+        self.graph_scroll_pos = max(0.0, min(1.0, new_scroll))
+        
+        # Renderiza imediatamente (super fluido!)
+        self.root.after(0, self._render_graph_fast)
     
     def _on_tree_right_click(self, event):
         """Clique direito na tabela para abrir serviços descobertos"""
@@ -1414,50 +1864,133 @@ class NetworkAnalyzerApp:
         self._save_ping_history()
         self._save_config()
     
-    def _draw_graph(self, ip_addr):
-        """Desenha gráfico com todos os pings do histórico e curva de tendência"""
-        pings = self._get_recent_pings(ip_addr)
-        if not pings:
-            self.ax.clear()
-            self.ax.text(0.5, 0.5, f"Nenhum dado para {ip_addr}", 
-                        ha='center', va='center', transform=self.ax.transAxes)
-            self.canvas.draw()
-            self.graph_info.config(text=f"Nenhum dado para {ip_addr}")
+    def _schedule_graph_redraw(self):
+        """Agenda redesenho do gráfico com debounce para evitar múltiplas chamadas"""
+        if not self.selected_ip:
             return
         
-        # Limpa o gráfico anterior
-        self.ax.clear()
+        # Cancela timer anterior se existir
+        if self.graph_scroll_timer:
+            self.root.after_cancel(self.graph_scroll_timer)
         
-        # Extrai valores e timestamps (compatível com tuplas ou valores simples)
-        valores_ping = []
-        timestamps = []
+        # Agenda novo redesenho após 50ms (debounce)
+        self.graph_scroll_timer = self.root.after(50, lambda: self._draw_graph_threaded(self.selected_ip))
+    
+    def _draw_graph_threaded(self, ip_addr):
+        """Wrapper que delega renderização para thread separada"""
+        with self.graph_render_lock:
+            # Se já há um render pendente para outro IP, espera
+            self.pending_graph_render = ip_addr
+        
+        # Inicia thread se não estiver rodando
+        if self.graph_render_thread is None or not self.graph_render_thread.is_alive():
+            self.graph_render_thread = threading.Thread(
+                target=self._graph_render_worker,
+                daemon=True,
+                name="GraphRenderer"
+            )
+            self.graph_render_thread.start()
+    
+    def _graph_render_worker(self):
+        """Worker thread para renderização do gráfico sem travar a UI"""
+        while True:
+            with self.graph_render_lock:
+                if self.pending_graph_render is None:
+                    break
+                ip_to_render = self.pending_graph_render
+                self.pending_graph_render = None
+            
+            # Faz todos os cálculos pesados NESTA thread (não na thread principal)
+            self._compute_graph_data(ip_to_render)
+            
+            # Apenas redesenha o canvas na thread principal
+            self.root.after(0, lambda: self._render_graph_to_canvas())
+            time.sleep(0.05)  # Pequeno delay para agrupar múltiplas requisições
+    
+    def _compute_graph_data(self, ip_addr):
+        """Calcula dados do gráfico (operações pesadas) - RÁPIDO"""
+        pings = self._get_recent_pings(ip_addr)
+        if not pings:
+            self.graph_computed_data = None
+            return
+        
+        # Extrai valores e timestamps (dados COMPLETOS)
+        valores_ping_completo = []
+        timestamps_completo = []
         for p in pings:
             if isinstance(p, tuple) and len(p) >= 2:
-                valores_ping.append(p[0])
-                timestamps.append(p[1])
+                valores_ping_completo.append(p[0])
+                timestamps_completo.append(p[1])
             else:
-                valores_ping.append(p)
-                timestamps.append("")
+                valores_ping_completo.append(p)
+                timestamps_completo.append("")
         
-        # Converte None → NaN para cálculo/plot ignorando timeouts
-        y_vals = np.array([v if v is not None else np.nan for v in valores_ping], dtype=float)
-        numeric_mask = ~np.isnan(y_vals)
-        timeouts_mask = np.isnan(y_vals)
-        timeout_count = int(np.sum(timeouts_mask))
+        total_amostras = len(valores_ping_completo)
         
-        # Estatísticas (ignorando timeouts)
-        has_numeric = bool(np.any(numeric_mask))
+        # Converte TODOS os dados para numpy (sem slice, para scroll reutilizar)
+        y_vals_all = np.array([v if v is not None else np.nan for v in valores_ping_completo], dtype=float)
+        numeric_mask_all = ~np.isnan(y_vals_all)
+        
+        # Calcula estatísticas gerais
+        has_numeric = bool(np.any(numeric_mask_all))
         if has_numeric:
-            max_ping = float(np.nanmax(y_vals))
-            min_ping = float(np.nanmin(y_vals))
-            avg_ping = float(np.nanmean(y_vals))
+            max_ping = float(np.nanmax(y_vals_all))
+            min_ping = float(np.nanmin(y_vals_all))
+            avg_ping = float(np.nanmean(y_vals_all))
         else:
             max_ping = min_ping = avg_ping = float('nan')
         
-        # Cria índices para o eixo X com espaçamento uniforme (sequencial)
-        x_vals = np.arange(len(valores_ping))
+        # Armazena dados computados (COMPLETOS, para scroll reutilizar)
+        self.graph_computed_data = {
+            'ip_addr': ip_addr,
+            'y_vals_all': y_vals_all,           # TODOS os valores
+            'timestamps_all': timestamps_completo,  # TODOS os timestamps
+            'y_vals': y_vals_all,      # Para compatibilidade
+            'numeric_mask': numeric_mask_all,
+            'has_numeric': has_numeric,
+            'max_ping': max_ping,
+            'min_ping': min_ping,
+            'avg_ping': avg_ping,
+            'total_amostras': total_amostras,
+        }
+    
+    def _render_graph_to_canvas(self):
+        """Renderiza o gráfico pré-computado no canvas (RÁPIDO - apenas drawing)"""
+        if self.graph_computed_data is None:
+            self.ax.clear()
+            self.ax.text(0.5, 0.5, f"Carregando...", 
+                        ha='center', va='center', transform=self.ax.transAxes)
+            self.canvas.draw_idle()
+            return
         
-        # Desenha a linha principal de pings (timeouts são NaN e o traço é interrompido)
+        data = self.graph_computed_data
+        ip_addr = data['ip_addr']
+        y_vals_all = data['y_vals_all']
+        timestamps_all = data['timestamps_all']
+        total_amostras = data['total_amostras']
+        has_numeric = data['has_numeric']
+        
+        # Calcula janela visível
+        if total_amostras > self.graph_window_size:
+            max_scroll = total_amostras - self.graph_window_size
+            start_idx = int(self.graph_scroll_pos * max_scroll)
+            end_idx = start_idx + self.graph_window_size
+            
+            y_vals = y_vals_all[start_idx:end_idx]
+            timestamps = timestamps_all[start_idx:end_idx]
+            visible_frac = self.graph_window_size / total_amostras
+        else:
+            y_vals = y_vals_all
+            timestamps = timestamps_all
+            visible_frac = 1.0
+        
+        # Limpa e desenha
+        self.ax.clear()
+        x_vals = np.arange(len(y_vals))
+        numeric_mask = ~np.isnan(y_vals)
+        timeouts_mask = np.isnan(y_vals)
+        
+        # Desenha linha principal
         self.ax.plot(
             x_vals, y_vals,
             color='#2196F3', linewidth=2, marker='o', markersize=5,
@@ -1465,47 +1998,35 @@ class NetworkAnalyzerApp:
             markeredgewidth=1, alpha=0.8
         )
         
-        # Marca timeouts com pontos vermelhos
+        # Marca timeouts
+        timeout_count = int(np.sum(timeouts_mask))
         if timeout_count:
             timeout_x = x_vals[timeouts_mask]
-            # Usa um valor visualmente destacado na base (sem afetar estatística)
-            self.ax.scatter(timeout_x, [0]*len(timeout_x), s=36, c='#D32F2F',
-                            marker='o', label='Timeout', zorder=6)
-        
-        # Curva de tendência (polyfit grau 2)
-        if has_numeric and np.sum(numeric_mask) >= 3:
-            try:
-                # Usa apenas pontos válidos para regressão
-                x_num = x_vals[numeric_mask]
-                y_num = y_vals[numeric_mask]
-                z = np.polyfit(x_num, y_num, 2)
-                p = np.poly1d(z)
-                x_smooth = np.linspace(x_vals.min(), x_vals.max(), 100)
-                y_smooth = p(x_smooth)
-                self.ax.plot(x_smooth, y_smooth, color='#4CAF50', linewidth=2.5, 
-                            label='Tendência', linestyle='--', alpha=0.8)
-            except:
-                pass
-        
-        # Destaca o último ponto
-        if len(valores_ping) > 0 and valores_ping[-1] is not None:
-            self.ax.plot(len(valores_ping)-1, valores_ping[-1], color='#FF5722', marker='o', 
-                        markersize=8, markeredgecolor='#E64A19', markeredgewidth=2, 
-                        label='Último valor', zorder=5)
+            for tx in timeout_x:
+                self.ax.axvline(x=tx, color='#D32F2F', linewidth=3, alpha=0.7, linestyle='-', zorder=1)
+            if len(timeout_x) > 0:
+                self.ax.axvline(x=timeout_x[0], color='#D32F2F', linewidth=3, alpha=0.7, label='Timeout', zorder=1)
         
         # Linha de média
         if has_numeric:
+            avg_ping = float(np.nanmean(y_vals))
             self.ax.axhline(y=avg_ping, color='#FFC107', linestyle=':', linewidth=2, 
                            label=f'Média: {int(avg_ping)}ms', alpha=0.7)
+        else:
+            avg_ping = float('nan')
         
-        # Configuração dos eixos com timestamps
-        # Mostra apenas alguns timestamps para não poluir o gráfico
-        step = max(1, len(timestamps) // 10)  # até 10 timestamps
-        x_ticks = list(range(0, len(timestamps), step))
-        if len(timestamps) - 1 not in x_ticks:
-            x_ticks.append(len(timestamps) - 1)
-        x_ticks = sorted(set(x_ticks))
-        x_labels = [timestamps[i] if i < len(timestamps) else "" for i in x_ticks]
+        # Configura eixos
+        if len(timestamps) > 0:
+            step = max(1, len(timestamps) // 10)
+            x_ticks = list(range(0, len(timestamps), step))
+            if len(timestamps) - 1 not in x_ticks and len(timestamps) > 0:
+                x_ticks.append(len(timestamps) - 1)
+            x_ticks = sorted(set(x_ticks))
+            x_ticks = [t for t in x_ticks if t < len(timestamps)]
+            x_labels = [timestamps[i] for i in x_ticks]
+        else:
+            x_ticks = []
+            x_labels = []
         
         self.ax.set_xticks(x_ticks)
         self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
@@ -1515,66 +2036,22 @@ class NetworkAnalyzerApp:
         self.ax.set_facecolor('#fafafa')
         self.ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
         
-        # Ajusta espaçamento
-        self.fig.tight_layout()
+        # Atualiza scrollbar
+        self.graph_scrollbar.set(self.graph_scroll_pos, self.graph_scroll_pos + visible_frac)
         
-        # Armazena dados para tooltip (mantém None para detectar timeout)
-        self.graph_values = valores_ping
+        # Armazena dados para tooltip
+        self.graph_values = list(y_vals)
         self.graph_timestamps = timestamps
         
-        # Redesenha o canvas
-        self.canvas.draw()
+        # Redesenha (super rápido, sem cálculos)
+        self.canvas.draw_idle()
         
-        # Atualiza informações
-        if has_numeric:
-            self.graph_info.config(
-                text=f"{ip_addr} | Min: {int(min_ping)}ms | Avg: {int(avg_ping)}ms | Max: {int(max_ping)}ms | Total: {len(valores_ping)} amostras | Timeouts: {timeout_count}"
-            )
-        else:
-            self.graph_info.config(
-                text=f"{ip_addr} | Somente timeouts ({timeout_count}) nas últimas {len(valores_ping)} amostras"
-            )
-
-    # ------------------------------------------------------------------
-    # Logging e status
-    def log(self, msg: str):
-        timestamp = time.strftime("%H:%M:%S")
-        self.queue.put(("log", f"[{timestamp}] {msg}\n"))
-
-    def set_status(self, msg: str):
-        self.queue.put(("status", msg))
-
-    # ------------------------------------------------------------------
-    # Histórico de pings
-    def _extrair_ms_do_ping(self, ping_str):
-        """Extrai valor numérico em ms do string de ping"""
-        try:
-            # Formato: "X.XX ms (Y/Z)"
-            m = re.search(r"(\d+\.?\d*)\s*ms", ping_str)
-            if m:
-                return float(m.group(1))
-        except:
-            pass
-        return None
-
-    def _gerar_grafico_ping(self, ip):
-        """Retorna uma string vazia - gráfico agora é visual no Canvas"""
-        pings_raw = self._get_recent_pings(ip)
-        if not pings_raw:
-            return "▪"
-        
-        pings = [p[0] if isinstance(p, tuple) else p for p in pings_raw]
-        avg = sum(pings) / len(pings) if pings else 0
-        
-        if avg < 20:
-            return "●●●●● (Excelente)"  # verde
-        elif avg < 50:
-            return "●●●●○ (Bom)"  # amarelo
-        elif avg < 100:
-            return "●●●○○ (Ok)"  # laranja
-        else:
-            return "●●○○○ (Lento)"  # vermelho
-
+        # Atualiza info
+        timeout_info = f" | Timeouts: {timeout_count}" if timeout_count else ""
+        self.graph_info.config(
+            text=f"Min: {data['min_ping']:.1f}ms | Max: {data['max_ping']:.1f}ms | Média: {avg_ping:.1f}ms | Total: {total_amostras}{timeout_info}"
+        )
+    
     def _gerar_micrografico(self, ip):
         """Gera um micrográfico em pixels (sparkline) do histórico de ping com a leitura atual"""
         dados = self._get_recent_pings(ip)[-10:]
@@ -1608,6 +2085,52 @@ class NetworkAnalyzerApp:
         result += f" {int(current_ping)}ms"
         
         return result
+
+    # ------------------------------------------------------------------
+    # Logging e status
+    def log(self, msg: str):
+        timestamp = time.strftime("%H:%M:%S")
+        self.queue.put(("log", f"[{timestamp}] {msg}\n"))
+
+    def set_status(self, msg: str):
+        self.queue.put(("status", msg))
+
+    # ------------------------------------------------------------------
+    # Histórico de pings
+    def _extrair_ms_do_ping(self, ping_str):
+        """Extrai valor numérico em ms do string de ping"""
+        try:
+            # Formato: "X.XX ms (Y/Z)"
+            m = re.search(r"(\d+\.?\d*)\s*ms", ping_str)
+            if m:
+                return float(m.group(1))
+        except:
+            pass
+        return None
+
+    def _gerar_grafico_ping(self, ip):
+        """Retorna uma string com status do gráfico"""
+        pings_raw = self._get_recent_pings(ip)
+        if not pings_raw:
+            return "▪"
+        
+        # Extrai valores e filtra None (timeouts)
+        pings = [p[0] if isinstance(p, tuple) else p for p in pings_raw]
+        pings = [p for p in pings if p is not None]  # Remove None antes de calcular
+        
+        if not pings:  # Se só tem timeouts
+            return "●○○○○ (Timeouts)"
+        
+        avg = sum(pings) / len(pings)
+        
+        if avg < 20:
+            return "●●●●● (Excelente)"  # verde
+        elif avg < 50:
+            return "●●●●○ (Bom)"  # amarelo
+        elif avg < 100:
+            return "●●●○○ (Ok)"  # laranja
+        else:
+            return "●●○○○ (Lento)"  # vermelho
 
     def _discover_gateway_identifier(self, ip_local: str, mascara: str) -> str:
         """Tenta obter um identificador estável do gateway/AP sem depender do IP."""
@@ -1701,7 +2224,12 @@ class NetworkAnalyzerApp:
             self.set_status(f"Descobertos {total} dispositivos, iniciando monitoramento...")
             self.log(f"ARP scan encontrou {total} dispositivos")
             
+            # Log de debug: lista todos os IPs encontrados
+            for ip_found in sorted(dispositivos.keys(), key=lambda x: [int(p) for p in x.split('.')]):
+                self.log(f"  → Dispositivo encontrado: {ip_found} ({dispositivos[ip_found]})")
+            
             # Lança uma thread por dispositivo (monitoramento paralelo)
+            # OTIMIZAÇÃO: Adiciona delay entre threads para evitar spike de CPU
             idx = 0
             for ip_addr, mac in sorted(dispositivos.items(), key=lambda x: [int(p) for p in x[0].split('.')]):
                 idx += 1
@@ -1718,6 +2246,11 @@ class NetworkAnalyzerApp:
                         )
                         self.device_threads[ip_addr] = thread
                         thread.start()
+                        self.log(f"  → Thread iniciada para {ip_addr}")
+                        # Delay de 200ms entre cada thread para evitar spike de CPU
+                        time.sleep(0.2)
+                    else:
+                        self.log(f"  → Thread já existe para {ip_addr}, reutilizando")
             
             self.set_status(f"Monitorando {total} dispositivos")
             # Salva rastreamento após scan inicial
@@ -1727,6 +2260,7 @@ class NetworkAnalyzerApp:
 
     def _monitor_device(self, num, ip_addr, mac):
         """Thread contínua para monitorar um único dispositivo"""
+        self.log(f"[{ip_addr}] Thread de monitoramento iniciada")
         tentativas = max(1, self.ping_attempts.get())
         
         # Inicializa histórico se necessário
@@ -1735,15 +2269,17 @@ class NetworkAnalyzerApp:
                 self.ping_history[ip_addr] = []
         
         # Primeiro, coleta informações gerais (uma vez)
+        self.log(f"[{ip_addr}] Coletando informações do dispositivo...")
         hostname, fabricante = obter_info_dispositivo(ip_addr, mac)
         netbios = obter_netbios(ip_addr)
         
-        # Escaneia portas para descobrir serviços
-        self.log(f"[{ip_addr}] Escaneando portas...")
-        servicos = escanear_portas(ip_addr, timeout=1)
-        self.log(f"[{ip_addr}] Serviços encontrados: {servicos}")
+        # OTIMIZAÇÃO: Escanear portas é MUITO lento, desabilitado por padrão
+        # Pode ser reativado se necessário, mas impacta severamente a performance
+        servicos = "N/A"  # Desabilitado para melhorar performance
+        # servicos = escanear_portas(ip_addr, timeout=1)
         
         # Loop contínuo de ping enquanto o dispositivo está ativo
+        self.log(f"[{ip_addr}] Iniciando loop de monitoramento contínuo...")
         while not self.stop_event.is_set():
             try:
                 # Realiza ping
@@ -1751,15 +2287,16 @@ class NetworkAnalyzerApp:
                 
                 # Extrai valor numérico e armazena no histórico com timestamp
                 ms_valor = self._extrair_ms_do_ping(ping)
-                online_arp_tcp, metodo = verificar_online_arp_tcp(ip_addr)
-                status_bool = (ms_valor is not None) or online_arp_tcp
+                # OTIMIZAÇÃO: Remover verificação ARP/TCP (muito pesada)
+                status_bool = (ms_valor is not None)
                 status_icon = "ONLINE" if status_bool else "OFFLINE"
+                metodo = "Ping"
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 # Registra tanto sucesso quanto timeout no histórico
                 with self.ping_history_lock:
                     self.ping_history.setdefault(ip_addr, []).append((ms_valor if ms_valor is not None else None, timestamp))
-                self._prune_history_by_hours()
-                self._save_ping_history_throttled()
+                # OTIMIZAÇÃO: Prune e save apenas a cada 30 segundos (não a cada ping!)
+                self._save_ping_history_throttled(interval_seconds=60)
                 
                 # Gera gráfico com histórico
                 historico = self._gerar_grafico_ping(ip_addr)
@@ -1781,14 +2318,13 @@ class NetworkAnalyzerApp:
                     "detec": metodo or "",
                 }
                 
-                # Log no terminal
-                self.log(f"[{ip_addr}] {ping} | MAC: {mac} | {fabricante}")
+                # OTIMIZAÇÃO: Remover logging de cada ping (gera muito I/O)
                 
                 # Atualiza tabela em tempo real
                 self.queue.put(("table_item", item))
                 
-                # Aguarda antes do próximo ping (5 segundos entre pings)
-                for _ in range(5):
+                # Aguarda antes do próximo ping (15 segundos para reduzir carga)
+                for _ in range(15):
                     if self.stop_event.is_set():
                         break
                     time.sleep(1)
@@ -1801,8 +2337,15 @@ class NetworkAnalyzerApp:
     # Queue processing
     def _process_queue(self):
         try:
-            while True:
-                kind, payload = self.queue.get_nowait()
+            # Processa em lotes (até 10 itens de uma vez) para reduzir overhead
+            processed = 0
+            max_batch_size = 10
+            while processed < max_batch_size:
+                try:
+                    kind, payload = self.queue.get_nowait()
+                except Empty:
+                    break
+                
                 if kind == "log":
                     self._append_log(payload)
                 elif kind == "status":
@@ -1813,13 +2356,15 @@ class NetworkAnalyzerApp:
                     self._add_table_item(payload)
                     # Atualiza gráfico em tempo real se o IP está selecionado
                     if self.selected_ip and payload["ip"] == self.selected_ip:
-                        self._draw_graph(self.selected_ip)
+                        self._draw_graph_threaded(self.selected_ip)
                 elif kind == "table":
                     self._update_table(payload)
                 self.queue.task_done()
+                processed += 1
         except Empty:
             pass
-        self.root.after(200, self._process_queue)
+        # Reagenda com intervalo maior (600ms para performance agressiva)
+        self.root.after(600, self._process_queue)
 
     def _append_log(self, text: str):
         self.log_text.configure(state=tk.NORMAL)
@@ -1847,21 +2392,36 @@ class NetworkAnalyzerApp:
             pass
 
     def _auto_resize_columns(self):
-        """Ajusta a largura das colunas ao maior conteúdo visível."""
+        """Ajusta a largura das colunas ao maior conteúdo visível - com debounce"""
         if not hasattr(self, "tree"):
             return
+        
+        # Cancela timer anterior se existir
+        if self.resize_columns_timer:
+            self.root.after_cancel(self.resize_columns_timer)
+        
+        # Agenda redimensionamento para 500ms depois (agrupa múltiplas chamadas)
+        self.resize_columns_timer = self.root.after(500, self._do_auto_resize_columns)
+    
+    def _do_auto_resize_columns(self):
+        """Realmente redimensiona as colunas"""
         try:
             font = tkfont.nametofont(self.tree.cget("font"))
             padding = 16  # pequeno espaço extra
             for col in self.tree["columns"]:
                 header_text = self.tree.heading(col).get("text", "")
                 max_width = font.measure(str(header_text))
-                for item_id in self.tree.get_children():
+                # Limita a apenas 50 primeiras linhas para não varrer TODA a tabela
+                for idx, item_id in enumerate(self.tree.get_children()):
+                    if idx > 50:  # Amostra apenas das primeiras 50 linhas
+                        break
                     val = self.tree.set(item_id, col)
                     max_width = max(max_width, font.measure(str(val)))
                 self.tree.column(col, width=max_width + padding)
         except Exception:
             pass
+        finally:
+            self.resize_columns_timer = None
 
     def _add_table_item(self, item):
         """Adiciona ou atualiza um item na tabela, evitando duplicatas"""
