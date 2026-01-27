@@ -42,7 +42,7 @@ import time
 from datetime import datetime, timedelta
 from queue import Queue, Empty
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import tkinter.font as tkfont
 import json
 import os
@@ -104,6 +104,7 @@ class NetworkAnalyzerApp:
         # Estado de threads de dispositivos
         self.device_threads = {}  # {ip: thread object}
         self.device_lock = threading.Lock()  # protege acesso ao dicionário
+        self.device_services = {}  # {ip: string de serviços detectados}
         
         # IP selecionado para gráfico
         self.selected_ip = None
@@ -431,12 +432,24 @@ class NetworkAnalyzerApp:
                                                    command=self._clear_device_history, state=tk.DISABLED)
         self.btn_clear_device_history.pack(fill=tk.X)
         
+        # Container dividido: metade superior gráfico, metade inferior anotações
+        graph_split = ttk.Frame(graph_frame)
+        graph_split.pack(fill=tk.BOTH, expand=True)
+        graph_split.rowconfigure(0, weight=1)
+        graph_split.rowconfigure(1, weight=1)
+        graph_split.columnconfigure(0, weight=1)
+
+        graph_area = ttk.Frame(graph_split)
+        graph_area.grid(row=0, column=0, sticky="nsew")
+
         # Cria figura matplotlib
         self.fig = Figure(figsize=(4.5, 2.8), dpi=100)
         self.ax = self.fig.add_subplot(111)
         self.fig.patch.set_facecolor('#f0f0f0')
+        # Ajusta layout para evitar corte de labels
+        self.fig.tight_layout(pad=2.0)
         
-        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_area)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
         
         # Controles da janela deslizante do gráfico
@@ -445,9 +458,13 @@ class NetworkAnalyzerApp:
         self.graph_window_min = 10  # Mínimo de amostras (zoom in máximo)
         self.graph_window_max = 200  # Máximo de amostras (zoom out máximo)
         self.graph_zoom_debounce_id = None  # Para debouncing do zoom com mousewheel
+        self.graph_drag_sensitivity = 0.12  # Sensibilidade do arrasto (menor = mais lento, mais precisão)
+        self.graph_window_start = 0  # Índice inicial da janela visível
+        self.graph_annotations = {}  # {ip: [lista de anotações]} por dispositivo
+        self.current_annotations = []  # Anotações do dispositivo atualmente selecionado
         
         # Frame para scrollbar horizontal
-        scroll_frame = ttk.Frame(graph_frame)
+        scroll_frame = ttk.Frame(graph_area)
         scroll_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         
         # Scrollbar horizontal para navegar no gráfico
@@ -473,8 +490,35 @@ class NetworkAnalyzerApp:
         self.canvas.mpl_connect('motion_notify_event', self._on_graph_drag)
         
         # Label para informações
-        self.graph_info = ttk.Label(graph_frame, text="Selecione um IP para ver o gráfico", justify="center")
+        self.graph_info = ttk.Label(graph_area, text="Selecione um IP para ver o gráfico", justify="center")
         self.graph_info.pack(fill=tk.X, padx=5, pady=5)
+
+        # Área de anotações com scroll horizontal e vertical
+        notes_frame = ttk.LabelFrame(graph_split, text="Anotações do Gráfico")
+        notes_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        notes_frame.rowconfigure(0, weight=1)
+        notes_frame.columnconfigure(0, weight=1)
+
+        notes_scroll_y = ttk.Scrollbar(notes_frame, orient=tk.VERTICAL)
+        notes_scroll_y.grid(row=0, column=1, sticky="ns")
+        notes_scroll_x = ttk.Scrollbar(notes_frame, orient=tk.HORIZONTAL)
+        notes_scroll_x.grid(row=1, column=0, sticky="ew")
+
+        self.graph_notes = tk.Text(
+            notes_frame,
+            wrap="none",
+            undo=True,
+            height=6,
+            yscrollcommand=notes_scroll_y.set,
+            xscrollcommand=notes_scroll_x.set,
+        )
+        self.graph_notes.grid(row=0, column=0, sticky="nsew")
+
+        # Edição de anotação via duplo-clique
+        self.graph_notes.bind("<Double-1>", self._on_notes_double_click)
+
+        notes_scroll_y.config(command=self.graph_notes.yview)
+        notes_scroll_x.config(command=self.graph_notes.xview)
         
         # Vincula clique na tabela para mostrar gráfico
         self.tree.bind("<ButtonRelease-1>", self._on_tree_select)
@@ -1249,6 +1293,9 @@ class NetworkAnalyzerApp:
                 self.selected_ip = ip_addr  # Armazena IP selecionado
                 self.btn_browser.config(state=tk.NORMAL)  # Habilita botão
                 self.btn_clear_device_history.config(state=tk.NORMAL)  # Habilita botão de zerar histórico
+                # Carrega anotações específicas deste dispositivo
+                self.current_annotations = self.graph_annotations.get(ip_addr, [])
+                self._refresh_annotations_view()
                 self._draw_graph_threaded(ip_addr)
     
     def _open_browser(self):
@@ -1363,10 +1410,15 @@ class NetworkAnalyzerApp:
             scroll_pos = self.graph_scroll_pos
             visible_frac = self.graph_window_size / total_amostras
         else:
+            start_idx = 0
+            end_idx = len(y_vals_all)
             y_vals = y_vals_all
             timestamps = timestamps_all
             scroll_pos = 0
             visible_frac = 1.0
+
+        # Guarda índice inicial da janela para mapear anotações
+        self.graph_window_start = start_idx
         
         # Limpa e renderiza apenas a linha (sem cálculos pesados)
         self.ax.clear()
@@ -1397,6 +1449,37 @@ class NetworkAnalyzerApp:
             avg_ping = float(np.nanmean(y_vals))
             self.ax.axhline(y=avg_ping, color='#FFC107', linestyle=':', linewidth=2, 
                            label=f'Média: {int(avg_ping)}ms', alpha=0.7)
+
+        # Marcações de anotações numeradas dentro da janela visível
+        if self.current_annotations:
+            ylim = self.ax.get_ylim()
+            y_top = ylim[1]
+            for ann in self.current_annotations:
+                # Usa timestamp como referência absoluta para encontrar posição correta
+                ann_timestamp = ann.get("timestamp")
+                if ann_timestamp is None:
+                    continue
+                
+                # Busca o índice correspondente ao timestamp na janela visível atual
+                try:
+                    if ann_timestamp in timestamps:
+                        local_x = float(timestamps.index(ann_timestamp))
+                    else:
+                        # Se timestamp exato não existe (após zoom), busca no array completo
+                        x_idx = ann.get("x_idx")
+                        if x_idx is not None and start_idx <= x_idx < end_idx:
+                            local_x = float(x_idx - start_idx)
+                        else:
+                            continue
+                    
+                    # Garante que está dentro dos limites do gráfico
+                    if 0 <= local_x < len(y_vals):
+                        self.ax.axvline(x=local_x, color='#2E7D32', linewidth=2, linestyle='--', alpha=0.8, zorder=3)
+                        self.ax.text(local_x, y_top * 0.98, f"#{ann['id']}", color='#2E7D32', fontsize=9,
+                                      ha='center', va='top', fontweight='bold', 
+                                      bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#2E7D32', alpha=0.8))
+                except (ValueError, IndexError):
+                    continue
         
         # Configura eixos (mínimo de processamento)
         if len(timestamps) > 0:
@@ -1414,10 +1497,16 @@ class NetworkAnalyzerApp:
         self.ax.set_xticks(x_ticks)
         self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
         self.ax.set_ylabel('Latência (ms)', fontsize=9, color='#333')
-        self.ax.set_title(f'Ping - {ip_addr}', fontsize=11, fontweight='bold')
+        
+        # Calcula porcentagem de zoom (0% = zoom out máximo, 100% = zoom in máximo)
+        zoom_percent = 100 * (self.graph_window_max - self.graph_window_size) / (self.graph_window_max - self.graph_window_min)
+        self.ax.set_title(f'Ping - {ip_addr}   |   Zoom: {int(zoom_percent)}%', fontsize=11, fontweight='bold')
         self.ax.grid(True, alpha=0.3, linestyle=':')
         self.ax.set_facecolor('#fafafa')
         self.ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+        
+        # Ajusta margens para não cortar labels do eixo X (margem inferior maior)
+        self.fig.subplots_adjust(bottom=0.25, left=0.12, right=0.95, top=0.90)
         
         # Atualiza scrollbar
         self.graph_scrollbar.set(scroll_pos, scroll_pos + visible_frac)
@@ -1463,6 +1552,11 @@ class NetworkAnalyzerApp:
         """Inicia o arrasto do gráfico (pan) com o mouse"""
         if event.inaxes != self.ax or event.button != 1:  # Apenas botão esquerdo
             return
+
+        # Duplo clique abre anotação sem acionar pan
+        if getattr(event, "dblclick", False):
+            self._prompt_graph_annotation(event)
+            return
         
         # Verifica se há dados para fazer scroll
         if self.graph_computed_data is None:
@@ -1502,7 +1596,7 @@ class NetworkAnalyzerApp:
         max_scroll = total_amostras - self.graph_window_size
         
         # Quanto maior o movimento, mais rápido o scroll (sensibilidade ajustável)
-        scroll_delta = -delta_x / self.graph_window_size
+        scroll_delta = (-delta_x / self.graph_window_size) * self.graph_drag_sensitivity
         
         # Atualiza posição de scroll
         new_scroll = self.graph_drag_start_scroll + scroll_delta
@@ -1510,6 +1604,100 @@ class NetworkAnalyzerApp:
         
         # Renderiza imediatamente (super fluido!)
         self.root.after(0, self._render_graph_fast)
+
+    def _prompt_graph_annotation(self, event):
+        """Abre diálogo para anotar observações e salva no painel de anotações"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        global_idx = None
+        try:
+            if event is not None and event.xdata is not None:
+                # Limita xdata ao range válido do gráfico atual
+                x_click = event.xdata
+                if x_click < 0:
+                    x_click = 0
+                elif hasattr(self, 'graph_values') and x_click >= len(self.graph_values):
+                    x_click = len(self.graph_values) - 1
+                
+                # Arredonda para o índice do ponto mais próximo
+                idx_local = int(round(x_click))
+                
+                # Garante que está dentro dos limites
+                if hasattr(self, 'graph_values'):
+                    idx_local = max(0, min(idx_local, len(self.graph_values) - 1))
+                
+                # Converte índice local da janela para índice global dos dados
+                global_idx = idx_local + getattr(self, "graph_window_start", 0)
+                
+                # Busca timestamp exato dos dados completos
+                if self.graph_computed_data:
+                    ts_all = self.graph_computed_data.get('timestamps_all') or self.graph_computed_data.get('timestamps') or []
+                    if 0 <= global_idx < len(ts_all):
+                        timestamp = ts_all[global_idx]
+        except Exception as e:
+            pass  # fallback para timestamp atual
+
+        note = simpledialog.askstring("Anotação do Gráfico", "Digite a observação:", parent=self.root)
+        if note and self.selected_ip:
+            text = note.strip()
+            annotation = {
+                "id": len(self.current_annotations) + 1,
+                "timestamp": timestamp,  # Timestamp como referência absoluta
+                "text": text,
+                "x_idx": global_idx,  # Índice global nos dados originais
+            }
+            self.current_annotations.append(annotation)
+            # Salva no dicionário global
+            self.graph_annotations[self.selected_ip] = self.current_annotations
+            self._refresh_annotations_view()
+
+    def _refresh_annotations_view(self):
+        """Re-renderiza a lista de anotações e renumera marcadores"""
+        # Renumera para manter sequência limpa
+        for idx, ann in enumerate(self.current_annotations, start=1):
+            ann["id"] = idx
+
+        # Atualiza painel de texto
+        self.graph_notes.delete("1.0", tk.END)
+        for ann in self.current_annotations:
+            line = f"[{ann['timestamp']}] (# {ann['id']}) {ann['text']}\n"
+            self.graph_notes.insert(tk.END, line)
+        self.graph_notes.see(tk.END)
+
+        # Redesenha o gráfico para mostrar marcadores
+        self.root.after(0, self._render_graph_fast)
+
+    def _on_notes_double_click(self, event):
+        """Editar ou remover anotação ao dar duplo clique no painel de texto"""
+        try:
+            idx = self.graph_notes.index(f"@{event.x},{event.y}")
+            line_num = int(float(idx))  # linha começa em 1
+        except Exception:
+            return
+
+        if line_num < 1 or line_num > len(self.current_annotations):
+            return
+
+        ann = self.current_annotations[line_num - 1]
+        new_text = simpledialog.askstring(
+            "Editar anotação",
+            "Atualize o texto ou deixe vazio para remover:",
+            initialvalue=ann.get("text", ""),
+            parent=self.root,
+        )
+
+        if new_text is None:
+            return  # cancelou
+
+        if new_text.strip() == "":
+            # Remover anotação
+            self.current_annotations.pop(line_num - 1)
+        else:
+            ann["text"] = new_text.strip()
+
+        # Salva no dicionário global
+        if self.selected_ip:
+            self.graph_annotations[self.selected_ip] = self.current_annotations
+        self._refresh_annotations_view()
     
     def _on_tree_right_click(self, event):
         """Clique direito na tabela para abrir serviços descobertos"""
@@ -2278,10 +2466,16 @@ class NetworkAnalyzerApp:
         hostname, fabricante = obter_info_dispositivo(ip_addr, mac)
         netbios = obter_netbios(ip_addr)
         
-        # OTIMIZAÇÃO: Escanear portas é MUITO lento, desabilitado por padrão
-        # Pode ser reativado se necessário, mas impacta severamente a performance
-        servicos = "N/A"  # Desabilitado para melhorar performance
-        # servicos = escanear_portas(ip_addr, timeout=1)
+        # Escaneia portas em background (custo controlado)
+        servicos = self.device_services.get(ip_addr, "Escaneando portas...")
+        if ip_addr not in self.device_services:
+            self.device_services[ip_addr] = servicos
+            threading.Thread(
+                target=self._scan_ports_async,
+                args=(ip_addr,),
+                daemon=True,
+                name=f"Ports-{ip_addr}"
+            ).start()
         
         # Loop contínuo de ping enquanto o dispositivo está ativo
         self.log(f"[{ip_addr}] Iniciando loop de monitoramento contínuo...")
@@ -2307,6 +2501,9 @@ class NetworkAnalyzerApp:
                 historico = self._gerar_grafico_ping(ip_addr)
                 grafico = self._gerar_micrografico(ip_addr)
                 
+                # Atualiza serviços com último valor conhecido
+                servicos = self.device_services.get(ip_addr, servicos)
+
                 # Prepara item para a tabela
                 item = {
                     "num": num,
@@ -2338,6 +2535,18 @@ class NetworkAnalyzerApp:
                 self.log(f"Erro monitorando {ip_addr}: {e}")
                 time.sleep(5)
 
+    def _scan_ports_async(self, ip_addr: str):
+        """Escaneia portas em background e atualiza a tabela"""
+        try:
+            servicos = escanear_portas(ip_addr, timeout=0.6)
+            if not servicos:
+                servicos = "Nenhuma porta aberta"
+        except Exception as exc:
+            servicos = f"Erro portas: {exc}" if str(exc) else "Falha ao escanear"
+        self.device_services[ip_addr] = servicos
+        # Atualiza tabela de forma assíncrona
+        self.queue.put(("services", (ip_addr, servicos)))
+
     # ------------------------------------------------------------------
     # Queue processing
     def _process_queue(self):
@@ -2362,6 +2571,9 @@ class NetworkAnalyzerApp:
                     # Atualiza gráfico em tempo real se o IP está selecionado
                     if self.selected_ip and payload["ip"] == self.selected_ip:
                         self._draw_graph_threaded(self.selected_ip)
+                elif kind == "services":
+                    ip_addr, servicos = payload
+                    self._update_services(ip_addr, servicos)
                 elif kind == "table":
                     self._update_table(payload)
                 self.queue.task_done()
@@ -2394,6 +2606,21 @@ class NetworkAnalyzerApp:
             else:
                 self.tree.item(item_id, tags=("offline",))
         except:
+            pass
+
+    def _update_services(self, ip_addr: str, servicos: str):
+        """Atualiza a coluna de serviços para o IP informado"""
+        try:
+            self.device_services[ip_addr] = servicos
+            item_id = self.table_ips.get(ip_addr)
+            if not item_id:
+                return
+            values = list(self.tree.item(item_id, 'values'))
+            if len(values) >= 9:
+                values[8] = servicos
+                self.tree.item(item_id, values=values)
+                self.root.after(0, self._auto_resize_columns)
+        except Exception:
             pass
 
     def _auto_resize_columns(self):
