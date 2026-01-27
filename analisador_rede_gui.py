@@ -196,8 +196,8 @@ class NetworkAnalyzerApp:
         # Frame da tabela
         table_frame = ttk.Frame(self.paned_window)
         
-        # Tabela com colunas: #, IP, MAC, Nome, Hostname, NetBIOS, Fabricante, Serviços, Ping, Histórico
-        columns = ("num", "status", "ip", "mac", "nome", "hostname", "netbios", "fabricante", "servicos", "ping", "grafico", "historico")
+        # Tabela com colunas: #, IP, MAC, Nome, Hostname, NetBIOS, Fabricante, Serviços, Ping, Histórico, Detecção
+        columns = ("num", "status", "ip", "mac", "nome", "hostname", "netbios", "fabricante", "servicos", "ping", "grafico", "historico", "detec")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings")
         self.tree.heading("num", text="#", command=lambda: self._sort_table("num"))
         self.tree.heading("status", text=" ", command=lambda: self._sort_table("status"))
@@ -211,6 +211,7 @@ class NetworkAnalyzerApp:
         self.tree.heading("ping", text="Ping", command=lambda: self._sort_table("ping"))
         self.tree.heading("grafico", text="Gráfico", command=lambda: self._sort_table("grafico"))
         self.tree.heading("historico", text="Histórico", command=lambda: self._sort_table("historico"))
+        self.tree.heading("detec", text="Detecção", command=lambda: self._sort_table("detec"))
         
         self.tree.column("num", width=25, anchor="center")
         self.tree.column("status", width=26, anchor="center")
@@ -224,6 +225,7 @@ class NetworkAnalyzerApp:
         self.tree.column("ping", width=70, anchor="center")
         self.tree.column("grafico", width=100, anchor="center")
         self.tree.column("historico", width=280, anchor="center")
+        self.tree.column("detec", width=90, anchor="center")
         
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
@@ -273,7 +275,14 @@ class NetworkAnalyzerApp:
         self.fig.patch.set_facecolor('#f0f0f0')
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+        
+        # Adiciona toolbar de navegação (zoom, pan, home, save)
+        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+        toolbar_frame = ttk.Frame(graph_frame)
+        toolbar_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
+        toolbar.update()
         
         # Variáveis para armazenar dados do gráfico para tooltip
         self.graph_data = None  # Será preenchido em _draw_graph
@@ -308,13 +317,11 @@ class NetworkAnalyzerApp:
 
     def _maybe_show_admin_tip(self):
         try:
-            if os.name == 'nt' and not getattr(self, 'admin_tip_shown', False):
+            if os.name == 'nt':
                 messagebox.showinfo(
                     "Recomendação",
                     "Para melhor descoberta de dispositivos e desempenho, execute este aplicativo como Administrador no Windows."
                 )
-                self.admin_tip_shown = True
-                self._save_config()
         except Exception:
             pass
 
@@ -1032,7 +1039,7 @@ class NetworkAnalyzerApp:
             return
         
         # Encontra o ponto mais próximo
-        x_index = int(round(x_data)) - 1  # Converte para índice (começa em 0)
+        x_index = int(round(x_data))  # Índice direto (já começa em 0)
         
         # Verifica se o índice é válido
         if 0 <= x_index < len(self.graph_values):
@@ -1447,8 +1454,8 @@ class NetworkAnalyzerApp:
         else:
             max_ping = min_ping = avg_ping = float('nan')
         
-        # Cria índices para o eixo X
-        x_vals = np.array(range(1, len(valores_ping) + 1))
+        # Cria índices para o eixo X com espaçamento uniforme (sequencial)
+        x_vals = np.arange(len(valores_ping))
         
         # Desenha a linha principal de pings (timeouts são NaN e o traço é interrompido)
         self.ax.plot(
@@ -1482,7 +1489,7 @@ class NetworkAnalyzerApp:
         
         # Destaca o último ponto
         if len(valores_ping) > 0 and valores_ping[-1] is not None:
-            self.ax.plot(len(valores_ping), valores_ping[-1], color='#FF5722', marker='o', 
+            self.ax.plot(len(valores_ping)-1, valores_ping[-1], color='#FF5722', marker='o', 
                         markersize=8, markeredgecolor='#E64A19', markeredgewidth=2, 
                         label='Último valor', zorder=5)
         
@@ -1494,9 +1501,11 @@ class NetworkAnalyzerApp:
         # Configuração dos eixos com timestamps
         # Mostra apenas alguns timestamps para não poluir o gráfico
         step = max(1, len(timestamps) // 10)  # até 10 timestamps
-        x_ticks = list(range(0, len(timestamps), step)) + [len(timestamps) - 1]
+        x_ticks = list(range(0, len(timestamps), step))
+        if len(timestamps) - 1 not in x_ticks:
+            x_ticks.append(len(timestamps) - 1)
         x_ticks = sorted(set(x_ticks))
-        x_labels = [timestamps[i-1] if i > 0 and i <= len(timestamps) else "" for i in x_ticks]
+        x_labels = [timestamps[i] if i < len(timestamps) else "" for i in x_ticks]
         
         self.ax.set_xticks(x_ticks)
         self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
@@ -1769,6 +1778,7 @@ class NetworkAnalyzerApp:
                     "historico": historico,
                     "mac": mac,
                     "status": status_icon,
+                    "detec": metodo or "",
                 }
                 
                 # Log no terminal
@@ -1911,7 +1921,8 @@ class NetworkAnalyzerApp:
                 item["servicos"],
                 item["ping"],
                 item["grafico"],
-                item["historico"]
+                item["historico"],
+                item.get("detec", "")
             ), tags=("updating", "online" if item.get("status") == "ONLINE" else "offline"))
             
             # Agenda remover a tag de destaque após 500ms
@@ -1930,7 +1941,8 @@ class NetworkAnalyzerApp:
                 item["servicos"],
                 item["ping"],
                 item["grafico"],
-                item["historico"]
+                item["historico"],
+                item.get("detec", "")
             ), tags=("updating", "online" if item.get("status") == "ONLINE" else "offline"))
             
             # Registra o IP no dicionário de rastreamento
@@ -1955,7 +1967,7 @@ class NetworkAnalyzerApp:
         items = []
         for item_id in self.tree.get_children():
             values = self.tree.item(item_id, 'values')
-            if len(values) >= 12:  # Garante que tem todas as colunas
+            if len(values) >= 13:  # Garante que tem todas as colunas
                 items.append({
                     "id": item_id,
                     "num": values[0],
@@ -1969,7 +1981,8 @@ class NetworkAnalyzerApp:
                     "servicos": values[8],
                     "ping": values[9],
                     "grafico": values[10],
-                    "historico": values[11]
+                    "historico": values[11],
+                    "detec": values[12]
                 })
 
         # Define chave de ordenação
@@ -1989,6 +2002,8 @@ class NetworkAnalyzerApp:
                     return float('inf')
             elif col == "status":
                 return str(val)
+            elif col == "detec":
+                return str(val).lower()
             # Para IP, converte para tupla numérica
             elif col == "ip":
                 try:
@@ -2064,7 +2079,8 @@ class NetworkAnalyzerApp:
                 item.get("servicos", ""),
                 item["ping"],
                 item.get("grafico", ""),
-                item.get("historico", "")
+                item.get("historico", ""),
+                item.get("detec", "")
             ))
 
 
