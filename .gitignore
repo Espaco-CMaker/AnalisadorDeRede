@@ -36,6 +36,10 @@ ping_history.json
 network_scan_*.json
 device_history/
 
+# Métricas de desenvolvimento (não compartilhar)
+DEV_METRICS.md
+TEMPO_DESENVOLVIMENTO.md
+
 # Backups
 *.bak
 *.backup

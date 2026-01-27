@@ -105,6 +105,10 @@ class NetworkAnalyzerApp:
         self.device_threads = {}  # {ip: thread object}
         self.device_lock = threading.Lock()  # protege acesso ao dicionário
         self.device_services = {}  # {ip: string de serviços detectados}
+
+        # Telemetria de threads (CPU per-thread)
+        self.thread_cpu_prev = {}  # {tid: total_cpu_time}
+        self.thread_cpu_prev_ts = time.time()
         
         # IP selecionado para gráfico
         self.selected_ip = None
@@ -145,6 +149,9 @@ class NetworkAnalyzerApp:
         # Carrega configurações do arquivo
         config = self._load_config()
         self.admin_tip_shown = bool(config.get("admin_tip_shown", False))
+        # Anotações por dispositivo (persistentes)
+        self.graph_annotations = config.get("graph_annotations", {})
+        self.current_annotations = []
         self._load_nicknames()  # Carrega apelidos de dispositivos
         
         # Inicializa banco OUI (fabricantes) - carrega do cache local
@@ -196,16 +203,19 @@ class NetworkAnalyzerApp:
         self.tab_macs = ttk.Frame(notebook)
         self.tab_config = ttk.Frame(notebook)
         self.tab_logs = ttk.Frame(notebook)
+        self.tab_threads = ttk.Frame(notebook)
 
         notebook.add(self.tab_devices, text="Dispositivos")
         notebook.add(self.tab_macs, text="MACs/Nomes")
         notebook.add(self.tab_config, text="Configurações")
         notebook.add(self.tab_logs, text="Logs")
+        notebook.add(self.tab_threads, text="Threads")
 
         self._build_devices_tab()
         self._build_macs_tab()
         self._build_config_tab()
         self._build_logs_tab()
+        self._build_threads_tab()
 
         # Recomenda execução como administrador (uma vez)
         self.root.after(800, self._maybe_show_admin_tip)
@@ -460,8 +470,7 @@ class NetworkAnalyzerApp:
         self.graph_zoom_debounce_id = None  # Para debouncing do zoom com mousewheel
         self.graph_drag_sensitivity = 0.12  # Sensibilidade do arrasto (menor = mais lento, mais precisão)
         self.graph_window_start = 0  # Índice inicial da janela visível
-        self.graph_annotations = {}  # {ip: [lista de anotações]} por dispositivo
-        self.current_annotations = []  # Anotações do dispositivo atualmente selecionado
+        # graph_annotations e current_annotations são carregados do config no __init__
         
         # Frame para scrollbar horizontal
         scroll_frame = ttk.Frame(graph_area)
@@ -669,6 +678,46 @@ class NetworkAnalyzerApp:
 
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10,0), pady=10)
         vsb.pack(side=tk.LEFT, fill=tk.Y, pady=10, padx=(0,10))
+
+    def _build_threads_tab(self):
+        if not PSUTIL_AVAILABLE:
+            lbl = ttk.Label(self.tab_threads, text="psutil não disponível - instale para ver threads", foreground="red")
+            lbl.pack(padx=10, pady=10)
+            return
+
+        frame = ttk.Frame(self.tab_threads)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        columns = ("name", "role", "origin", "action", "status", "cpu_pct", "cpu_time", "tid")
+        self.thread_tree = ttk.Treeview(frame, columns=columns, show="headings", height=18)
+        self.thread_tree.heading("name", text="Thread")
+        self.thread_tree.heading("role", text="Descrição")
+        self.thread_tree.heading("origin", text="Origem")
+        self.thread_tree.heading("action", text="Motivo/Ação")
+        self.thread_tree.heading("status", text="Status")
+        self.thread_tree.heading("cpu_pct", text="CPU %")
+        self.thread_tree.heading("cpu_time", text="CPU (s)")
+        self.thread_tree.heading("tid", text="TID")
+
+        self.thread_tree.column("name", width=160, anchor="w")
+        self.thread_tree.column("role", width=180, anchor="w")
+        self.thread_tree.column("origin", width=140, anchor="w")
+        self.thread_tree.column("action", width=200, anchor="w")
+        self.thread_tree.column("status", width=80, anchor="center")
+        self.thread_tree.column("cpu_pct", width=80, anchor="e")
+        self.thread_tree.column("cpu_time", width=80, anchor="e")
+        self.thread_tree.column("tid", width=90, anchor="center")
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.thread_tree.yview)
+        self.thread_tree.configure(yscrollcommand=vsb.set)
+        self.thread_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.thread_status_lbl = ttk.Label(self.tab_threads, text="", anchor="w")
+        self.thread_status_lbl.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        # Atualização periódica
+        self.root.after(1500, self._update_threads_tab)
 
     # ------------------------------------------------------------------
     # Persistência de sash position
@@ -1227,6 +1276,7 @@ class NetworkAnalyzerApp:
             "graph_sash_position": 650,
             "history_hours": 24,
             "admin_tip_shown": False,
+            "graph_annotations": {},
         }
         try:
             if os.path.exists(self.config_file):
@@ -1246,6 +1296,8 @@ class NetworkAnalyzerApp:
                         config["history_hours"] = default_config["history_hours"]
                     if "admin_tip_shown" not in config:
                         config["admin_tip_shown"] = default_config["admin_tip_shown"]
+                    if "graph_annotations" not in config:
+                        config["graph_annotations"] = default_config["graph_annotations"]
                     return config
         except Exception as e:
             print(f"Erro ao carregar config: {e}")
@@ -1268,6 +1320,7 @@ class NetworkAnalyzerApp:
                 "device_nicknames": self.device_nicknames,
                 "graph_sash_position": getattr(self, 'graph_sash_position', 650),
                 "admin_tip_shown": bool(getattr(self, 'admin_tip_shown', False)),
+                "graph_annotations": self.graph_annotations,
             }
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
@@ -1368,6 +1421,12 @@ class NetworkAnalyzerApp:
         if not self.selected_ip:
             return
         
+        # Ajusta limite máximo dinamicamente para permitir zoom out até cobrir todo o dataset
+        if self.graph_computed_data:
+            total_amostras = self.graph_computed_data.get('total_amostras', 0)
+            if total_amostras:
+                self.graph_window_max = max(self.graph_window_min, total_amostras)
+
         # Detecta direção do scroll
         if event.num == 5 or event.delta < 0:  # Scroll down = ZOOM OUT (mais amostras)
             zoom_factor = 1.1
@@ -1398,6 +1457,10 @@ class NetworkAnalyzerApp:
         y_vals_all = data['y_vals_all'] if 'y_vals_all' in data else data['y_vals']
         total_amostras = data['total_amostras']
         timestamps_all = data['timestamps_all'] if 'timestamps_all' in data else data['timestamps']
+
+        # Permite zoom out até 100% dos dados disponíveis
+        self.graph_window_max = max(self.graph_window_min, total_amostras)
+        self.graph_window_size = min(self.graph_window_size, self.graph_window_max)
         
         # Calcula índices da janela visível
         if total_amostras > self.graph_window_size:
@@ -1440,9 +1503,9 @@ class NetworkAnalyzerApp:
         if timeout_count:
             timeout_x = x_vals[timeouts_mask]
             for tx in timeout_x:
-                self.ax.axvline(x=tx, color='#D32F2F', linewidth=3, alpha=0.7, linestyle='-', zorder=1)
+                self.ax.axvline(x=tx, color='#D32F2F', linewidth=1.5, alpha=0.7, linestyle='-', zorder=1)
             if len(timeout_x) > 0:
-                self.ax.axvline(x=timeout_x[0], color='#D32F2F', linewidth=3, alpha=0.7, label='Timeout', zorder=1)
+                self.ax.axvline(x=timeout_x[0], color='#D32F2F', linewidth=1.5, alpha=0.7, label='Timeout', zorder=1)
         
         # Linha de média
         if np.any(numeric_mask):
@@ -1474,7 +1537,7 @@ class NetworkAnalyzerApp:
                     
                     # Garante que está dentro dos limites do gráfico
                     if 0 <= local_x < len(y_vals):
-                        self.ax.axvline(x=local_x, color='#2E7D32', linewidth=2, linestyle='--', alpha=0.8, zorder=3)
+                        self.ax.axvline(x=local_x, color='#2E7D32', linewidth=1.5, linestyle='--', alpha=0.8, zorder=3)
                         self.ax.text(local_x, y_top * 0.98, f"#{ann['id']}", color='#2E7D32', fontsize=9,
                                       ha='center', va='top', fontweight='bold', 
                                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#2E7D32', alpha=0.8))
@@ -1499,7 +1562,12 @@ class NetworkAnalyzerApp:
         self.ax.set_ylabel('Latência (ms)', fontsize=9, color='#333')
         
         # Calcula porcentagem de zoom (0% = zoom out máximo, 100% = zoom in máximo)
-        zoom_percent = 100 * (self.graph_window_max - self.graph_window_size) / (self.graph_window_max - self.graph_window_min)
+        denom = self.graph_window_max - self.graph_window_min
+        if denom <= 0:
+            zoom_percent = 100
+        else:
+            zoom_percent = 100 * (self.graph_window_max - self.graph_window_size) / denom
+            zoom_percent = max(0, min(100, zoom_percent))
         self.ax.set_title(f'Ping - {ip_addr}   |   Zoom: {int(zoom_percent)}%', fontsize=11, fontweight='bold')
         self.ax.grid(True, alpha=0.3, linestyle=':')
         self.ax.set_facecolor('#fafafa')
@@ -1662,6 +1730,11 @@ class NetworkAnalyzerApp:
             line = f"[{ann['timestamp']}] (# {ann['id']}) {ann['text']}\n"
             self.graph_notes.insert(tk.END, line)
         self.graph_notes.see(tk.END)
+
+        # Persiste anotações no config
+        if self.selected_ip:
+            self.graph_annotations[self.selected_ip] = self.current_annotations
+        self._save_config()
 
         # Redesenha o gráfico para mostrar marcadores
         self.root.after(0, self._render_graph_fast)
@@ -2196,9 +2269,9 @@ class NetworkAnalyzerApp:
         if timeout_count:
             timeout_x = x_vals[timeouts_mask]
             for tx in timeout_x:
-                self.ax.axvline(x=tx, color='#D32F2F', linewidth=3, alpha=0.7, linestyle='-', zorder=1)
+                self.ax.axvline(x=tx, color='#D32F2F', linewidth=1.5, alpha=0.7, linestyle='-', zorder=1)
             if len(timeout_x) > 0:
-                self.ax.axvline(x=timeout_x[0], color='#D32F2F', linewidth=3, alpha=0.7, label='Timeout', zorder=1)
+                self.ax.axvline(x=timeout_x[0], color='#D32F2F', linewidth=1.5, alpha=0.7, label='Timeout', zorder=1)
         
         # Linha de média
         if has_numeric:
@@ -2376,7 +2449,7 @@ class NetworkAnalyzerApp:
             return
         self.stop_event.clear()
         # Inicia apenas um scan (ARP + threads)
-        self.scan_thread = threading.Thread(target=self._do_scan, daemon=True)
+        self.scan_thread = threading.Thread(target=self._do_scan, daemon=True, name="Scanner-ARP")
         self.scan_thread.start()
         self.btn_start.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
@@ -2589,6 +2662,112 @@ class NetworkAnalyzerApp:
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
+    # ------------------------------------------------------------------
+    # Threads tab helpers
+    def _describe_thread_name(self, name: str) -> str:
+        """Fornece descrição amigável baseada no nome da thread"""
+        if not name:
+            return "(sem nome)"
+        name_l = name.lower()
+        if name_l.startswith("device-"):
+            return "Monitoramento de dispositivo"
+        if name_l.startswith("ports-"):
+            return "Escaneamento de portas"
+        if name_l.startswith("threadpool") or name_l.startswith("concurrent.futures"):
+            return "Thread pool (tarefas paralelas)"
+        if "render" in name_l:
+            return "Renderização de gráfico"
+        if "main" in name_l:
+            return "Thread principal (UI)"
+        if "scan" in name_l:
+            return "Varredura / scan"
+        return name
+
+    def _thread_origin_reason(self, name: str):
+        """Retorna (origem, ação/motivo) deduzidos pelo nome da thread"""
+        if not name:
+            return ("desconhecido", "")
+        name_l = name.lower()
+        if name_l.startswith("device-"):
+            return ("Monitoramento", "Ping, histórico e gráfico do dispositivo")
+        if name_l.startswith("ports-"):
+            return ("Monitoramento", "Scan de portas assíncrono")
+        if name_l.startswith("scanner-arp"):
+            return ("Início", "Varredura ARP e lançamento de threads")
+        if name_l.startswith("threadpool") or name_l.startswith("concurrent.futures"):
+            return ("Pool", "Tarefas paralelas (I/O/rede)")
+        if "render" in name_l:
+            return ("Gráfico", "Renderização/atualização do gráfico")
+        if "main" in name_l:
+            return ("UI", "Tkinter mainloop / eventos")
+        if "scan" in name_l:
+            return ("Scan", "Descoberta/varredura de dispositivos")
+        return ("Outro", "")
+
+    def _update_threads_tab(self):
+        if not PSUTIL_AVAILABLE or not hasattr(self, "thread_tree"):
+            return
+
+        try:
+            proc = psutil.Process(os.getpid())
+            ps_threads = {t.id: t.user_time + t.system_time for t in proc.threads()}
+            cpu_count = max(1, psutil.cpu_count(logical=True) or 1)
+            now = time.time()
+            interval = max(0.001, now - self.thread_cpu_prev_ts)
+
+            items = []
+            for t in threading.enumerate():
+                tid = getattr(t, "native_id", None) or getattr(t, "ident", None) or -1
+                total_cpu = ps_threads.get(tid)
+                prev_cpu = self.thread_cpu_prev.get(tid)
+                if total_cpu is not None and prev_cpu is not None:
+                    cpu_pct = max(0.0, (total_cpu - prev_cpu) / interval / cpu_count * 100)
+                else:
+                    cpu_pct = None
+
+                origin, action = self._thread_origin_reason(t.name)
+
+                items.append({
+                    "name": t.name,
+                    "role": self._describe_thread_name(t.name),
+                    "origin": origin,
+                    "action": action,
+                    "status": "alive" if t.is_alive() else "dead",
+                    "cpu_pct": cpu_pct,
+                    "cpu_time": total_cpu,
+                    "tid": tid,
+                })
+
+            # Atualiza árvore
+            for child in self.thread_tree.get_children():
+                self.thread_tree.delete(child)
+            for item in sorted(items, key=lambda x: str(x["name"])):
+                cpu_pct_txt = f"{item['cpu_pct']:.1f}%" if item['cpu_pct'] is not None else "—"
+                cpu_time_txt = f"{item['cpu_time']:.2f}" if item['cpu_time'] is not None else "—"
+                self.thread_tree.insert("", tk.END, values=(
+                    item["name"],
+                    item["role"],
+                    item["origin"],
+                    item["action"],
+                    item["status"],
+                    cpu_pct_txt,
+                    cpu_time_txt,
+                    item["tid"],
+                ))
+
+            # Salva snapshot para próximo cálculo de %
+            self.thread_cpu_prev = ps_threads
+            self.thread_cpu_prev_ts = now
+
+            # Status
+            self.thread_status_lbl.config(text=f"Threads ativas: {len(items)} | Intervalo amostra: {int(interval*1000)} ms")
+        except Exception as exc:
+            if hasattr(self, "thread_status_lbl"):
+                self.thread_status_lbl.config(text=f"Erro ao coletar threads: {exc}")
+
+        # Agenda próxima atualização
+        self.root.after(2000, self._update_threads_tab)
+
     def _clear_table(self):
         """Limpa todos os itens da tabela"""
         self.tree.delete(*self.tree.get_children())
@@ -2746,6 +2925,9 @@ class NetworkAnalyzerApp:
         # Ajusta larguras após inserir/atualizar
         self._auto_resize_columns()
 
+        # Mantém ordenação padrão (ID -> IP) sempre que a tabela é alterada
+        self._apply_default_table_order()
+
     def _sort_table(self, col):
         """Ordena a tabela por coluna"""
         # Alterna direção se for a mesma coluna
@@ -2818,6 +3000,40 @@ class NetworkAnalyzerApp:
         for idx, item in enumerate(items):
             self.tree.move(item["id"], "", idx)
 
+    def _apply_default_table_order(self):
+        """Ordena a tabela priorizando ID numérico e, na ausência, o IP"""
+        if not hasattr(self, "tree"):
+            return
+
+        items = []
+        for item_id in self.tree.get_children():
+            values = self.tree.item(item_id, "values")
+            if len(values) < 3:
+                continue
+
+            num_val = values[0]
+            ip_val = values[2]
+
+            try:
+                num_key = int(num_val)
+                prefix = 0  # IDs válidos têm prioridade
+            except (ValueError, TypeError):
+                num_key = float("inf")
+                prefix = 1  # Sem ID numérico, cai para IP
+
+            try:
+                ip_key = tuple(int(x) for x in str(ip_val).split("."))
+            except Exception:
+                ip_key = (999, 999, 999, 999)
+
+            items.append((prefix, num_key, ip_key, item_id))
+
+        # Ordena por prefixo (ID primeiro), depois ID, depois IP
+        items.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        for idx, (_, _, _, item_id) in enumerate(items):
+            self.tree.move(item_id, "", idx)
+
     def _filter_online_only(self):
         """Filtra a tabela para mostrar apenas dispositivos online (status = ONLINE)"""
         show_online_only = self.show_online_only_var.get()
@@ -2874,6 +3090,9 @@ class NetworkAnalyzerApp:
                 item.get("historico", ""),
                 item.get("detec", "")
             ))
+
+            # Reaplica ordenação padrão após carga
+            self._apply_default_table_order()
 
 
 def main():

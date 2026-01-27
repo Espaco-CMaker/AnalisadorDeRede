@@ -2,6 +2,23 @@
 
 Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
+## [2.1] - 2026-01-27
+
+### ✨ Novidades
+- Persistência de anotações do gráfico por dispositivo via `config.json`.
+- Aba **Threads** com visão por thread (origem/ação) e consumo de CPU.
+
+### 🔧 Melhorias
+- Zoom do gráfico agora alcança 100% das amostras disponíveis (scroll wheel ajusta dinamicamente o limite).
+- Tabela principal mantém ordenação padrão (ID → IP) a cada inserção/atualização.
+- Linhas verticais do gráfico (timeouts e marcadores) mais finas para visual mais limpo.
+
+### ✅ Correções
+- Título do gráfico calcula % de zoom com guarda para evitar divisão por zero e valores fora de 0-100%.
+
+### 🧪 Testes
+- `python -m py_compile analisador_rede_gui.py`
+
 ---
 
 ## [2.0] - 2026-01-25
@@ -158,4 +175,4 @@ self.table_ips = {
 
 ---
 
-**Última atualização**: 25 de janeiro de 2026
+**Última atualização**: 27 de janeiro de 2026
