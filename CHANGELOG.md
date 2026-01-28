@@ -2,6 +2,28 @@
 
 Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
+---
+
+## [3.0-ping-fork] - 2026-01-28
+
+### 🔄 Fork: Detecção por Ping
+
+**Estratégia nova de descoberta de dispositivos:**
+- ❌ Remover: ARP scan (varredura ARP tradicional)
+- ✅ Novo: Ping-based detection (cada thread faz ping em IP da rede)
+- **Mecanismo**: Pool de threads enviam ping para cada IP; sucesso/timeout define presença
+- **Vantagem**: Funciona em redes onde ARP é bloqueado/filtrado
+- **Base**: Reutiliza infraestrutura de threads, fila e UI do v2.1
+
+### 📋 Fases de Implementação
+
+1. **Fase 1**: Refatorar `_do_scan()` para usar range de IPs + threading pool
+2. **Fase 2**: Remover dependência de `fazer_arp_scan()` e `arp -a`
+3. **Fase 3**: Aprimorar detecção de info (hostname, MAC local) via fallback
+4. **Fase 4**: Testar e validar em redes reais
+
+---
+
 ## [2.1] - 2026-01-27
 
 ### ✨ Novidades
