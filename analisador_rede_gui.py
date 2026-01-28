@@ -1552,7 +1552,25 @@ class NetworkAnalyzerApp:
                 x_ticks.append(len(timestamps) - 1)
             x_ticks = sorted(set(x_ticks))
             x_ticks = [t for t in x_ticks if t < len(timestamps)]
-            x_labels = [timestamps[i] for i in x_ticks]
+            
+            # Formata labels: HH:MM:SS, com data quando muda o dia
+            x_labels = []
+            prev_date = None
+            for i in x_ticks:
+                ts = timestamps[i]
+                try:
+                    # Parse timestamp (formato: YYYY-MM-DD HH:MM:SS)
+                    if ' ' in ts:
+                        date_part, time_part = ts.split(' ', 1)
+                        if prev_date != date_part:
+                            x_labels.append(f"{date_part}\n{time_part}")
+                            prev_date = date_part
+                        else:
+                            x_labels.append(time_part)
+                    else:
+                        x_labels.append(ts)
+                except Exception:
+                    x_labels.append(ts)
         else:
             x_ticks = []
             x_labels = []
@@ -2289,7 +2307,25 @@ class NetworkAnalyzerApp:
                 x_ticks.append(len(timestamps) - 1)
             x_ticks = sorted(set(x_ticks))
             x_ticks = [t for t in x_ticks if t < len(timestamps)]
-            x_labels = [timestamps[i] for i in x_ticks]
+            
+            # Formata labels: HH:MM:SS, com data quando muda o dia
+            x_labels = []
+            prev_date = None
+            for i in x_ticks:
+                ts = timestamps[i]
+                try:
+                    # Parse timestamp (formato: YYYY-MM-DD HH:MM:SS)
+                    if ' ' in ts:
+                        date_part, time_part = ts.split(' ', 1)
+                        if prev_date != date_part:
+                            x_labels.append(f"{date_part}\n{time_part}")
+                            prev_date = date_part
+                        else:
+                            x_labels.append(time_part)
+                    else:
+                        x_labels.append(ts)
+                except Exception:
+                    x_labels.append(ts)
         else:
             x_ticks = []
             x_labels = []
