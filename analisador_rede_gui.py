@@ -1576,7 +1576,11 @@ class NetworkAnalyzerApp:
             x_labels = []
         
         self.ax.set_xticks(x_ticks)
-        self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
+        labels = self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
+        # Aplica cor azul para labels com data (contém \n)
+        for i, label in enumerate(labels):
+            if i < len(x_labels) and '\n' in str(x_labels[i]):
+                label.set_color('#1976D2')  # Azul para datas
         self.ax.set_ylabel('Latência (ms)', fontsize=9, color='#333')
         
         # Calcula porcentagem de zoom (0% = zoom out máximo, 100% = zoom in máximo)
@@ -2331,7 +2335,11 @@ class NetworkAnalyzerApp:
             x_labels = []
         
         self.ax.set_xticks(x_ticks)
-        self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
+        labels = self.ax.set_xticklabels(x_labels, rotation=45, ha='right', fontsize=8)
+        # Aplica cor azul para labels com data (contém \n)
+        for i, label in enumerate(labels):
+            if i < len(x_labels) and '\n' in str(x_labels[i]):
+                label.set_color('#1976D2')  # Azul para datas
         self.ax.set_ylabel('Latência (ms)', fontsize=9, color='#333')
         self.ax.set_title(f'Histórico Completo de Ping - {ip_addr}', fontsize=11, fontweight='bold')
         self.ax.grid(True, alpha=0.3, linestyle=':')
