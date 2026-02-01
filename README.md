@@ -6,7 +6,7 @@ Analisador de Rede é uma ferramenta completa para descoberta e monitoramento de
 **Desenvolvido para**: Windows (recomendado com privilégios administrativos)  
 **Linguagem**: Python 3.10+  
 **Interface**: Tkinter (GUI nativa)  
-**Versão**: 2.2 (Janeiro 2026)
+**Versão**: 2.5.1 (Janeiro 2026)
 
 ## Como Iniciar (v2.2)
 

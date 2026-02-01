@@ -1,5 +1,11 @@
 {
   "ping_attempts": 4,
   "scan_interval": 60,
-  "device_nicknames": {}
+  "history_hours": 24,
+  "device_nicknames": {},
+  "graph_sash_position": 650,
+  "admin_tip_shown": false,
+  "graph_annotations": {},
+  "max_threads": 20,
+  "max_memory_mb": 1024
 }

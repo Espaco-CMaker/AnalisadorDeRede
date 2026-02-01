@@ -586,9 +586,23 @@ def calcular_rede(ip, mascara):
     except:
         return None
 
-def fazer_arp_scan(ip_local, mascara):
-    """Executa ARP scan para descobrir dispositivos na rede"""
+def fazer_arp_scan(ip_local, mascara, max_workers=30):
+    """Executa ARP scan para descobrir dispositivos na rede
+    
+    Args:
+        ip_local: IP local da máquina
+        mascara: Máscara de sub-rede
+        max_workers: Número máximo de threads (padrão: 30, 0 = sem limite)
+    """
     try:
+        # Aplica limite de workers (se 0, usa padrão de 30)
+        if max_workers <= 0:
+            max_workers = 30
+        
+        # CRÍTICO: Garante que max_workers não excede o limite configurado
+        # Se for muito baixo (< 2), força mínimo de 2 para não travar
+        max_workers = max(2, min(max_workers, 10))  # Limite superior de 10 threads
+        
         rede = calcular_rede(ip_local, mascara)
         if not rede:
             print("[ERRO] Não foi possível calcular a rede")
@@ -663,16 +677,24 @@ def fazer_arp_scan(ip_local, mascara):
                         pass
                     return False
                 
-                # Faz ping paralelo em todos os hosts da rede (sem limite de 255)
+                # Faz ping paralelo em todos os hosts da rede
                 hosts_list = list(rede.hosts())
                 print(f"[INFO] Pingando {len(hosts_list)} endereços possíveis...")
                 print(f"[DEBUG] Timeout por ping: 4000ms (subprocess: 12s)")
-                print(f"[DEBUG] Workers paralelos: 100")
+                print(f"[DEBUG] Workers paralelos: {max_workers} (LIMITADO)")
+                print(f"[DEBUG] Tarefas na fila: {len(hosts_list)}")
                 
-                # Usa ThreadPoolExecutor para ping paralelo (mais rápido)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+                # ===== ENFILEIRA TODAS as tarefas e executa com limite de threads =====
+                # ThreadPoolExecutor automaticamente gerencia a fila interna:
+                # - Cria apenas max_workers threads
+                # - Enfileira tarefas excedentes
+                # - Executa novas tarefas conforme threads ficam livres
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit todas as tarefas (serão enfileiradas internamente)
                     futures = [executor.submit(ping_host, str(host)) for host in hosts_list]
+                    
                     # Aguarda conclusão com timeout
+                    # As threads serão reutilizadas automaticamente para processar a fila
                     done, not_done = concurrent.futures.wait(futures, timeout=360)
                     print(f"[DEBUG] Pings concluídos: {len(done)}/{len(futures)}")
                     print(f"[DEBUG] Pings com sucesso: {contador_sucesso[0]}")
@@ -714,17 +736,19 @@ def fazer_arp_scan(ip_local, mascara):
         print(f"[ERRO] Erro no ARP scan: {e}")
         return {}
 
-def calcular_ping(ip, tentativas=10):
-    """Calcula o ping médio para um IP"""
+def calcular_ping(ip, tentativas=10, packet_size=64):
+    """Calcula o ping médio para um IP, permitindo definir o tamanho do pacote (bytes)"""
     try:
         if platform.system() == "Windows":
-            texto_ping = run_cmd_capture(["ping", "-n", str(tentativas), "-w", "1000", ip], timeout=tentativas + 5)
+            texto_ping = run_cmd_capture([
+                "ping", "-n", str(tentativas), "-w", "1000", "-l", str(packet_size), ip
+            ], timeout=tentativas + 5)
         else:
-            texto_ping = run_cmd_capture(["ping", "-c", str(tentativas), "-W", "1000", ip], timeout=tentativas + 5)
-        
+            texto_ping = run_cmd_capture([
+                "ping", "-c", str(tentativas), "-W", "1000", "-s", str(packet_size), ip
+            ], timeout=tentativas + 5)
         # Procura por "time=" ou "tempo=" (extrai valores numéricos)
         tempos = re.findall(r"(?:time|tempo)=(\d+\.?\d*)\s*ms", texto_ping)
-        
         if tempos:
             # Calcula a média dos pings válidos
             media = sum(float(t) for t in tempos) / len(tempos)
@@ -733,7 +757,6 @@ def calcular_ping(ip, tentativas=10):
             return f"{media:.2f} ms ({total_tentativas}/{tentativas})"
         else:
             return "Sem resposta"
-    
     except subprocess.TimeoutExpired:
         return "Timeout"
     except Exception as e:
@@ -1280,9 +1303,19 @@ PORTA_SERVICOS = {
     50070: "Hadoop"
 }
 
-def escanear_portas(ip, timeout=0.5):
-    """Escaneia TODAS as portas comuns para descobrir serviços rodando (threaded)"""
+def escanear_portas(ip, timeout=0.5, max_workers=20):
+    """Escaneia TODAS as portas comuns para descobrir serviços rodando (threaded)
+    
+    Args:
+        ip: Endereço IP alvo
+        timeout: Timeout por porta
+        max_workers: Número máximo de threads (padrão: 20, 0 = sem limite)
+    """
     portas_abertas = []
+    
+    # Aplica limite de workers (se 0, usa padrão de 20)
+    if max_workers <= 0:
+        max_workers = 20
     
     # Expandir para incluir mais portas comuns
     portas_teste = list(PORTA_SERVICOS.keys())
@@ -1301,8 +1334,8 @@ def escanear_portas(ip, timeout=0.5):
             pass
         return None
     
-    # Escaneia portas em paralelo (até 20 threads)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    # Escaneia portas em paralelo (até max_workers threads)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         resultados = executor.map(testar_porta, portas_teste)
         portas_abertas = [p for p in resultados if p is not None]
     
@@ -1317,9 +1350,20 @@ def escanear_portas(ip, timeout=0.5):
     
     return ", ".join(servicos)
 
-def escanear_todas_portas(ip, timeout=0.3, max_porta=1024):
-    """Escaneia TODAS as portas até max_porta (mais lento, mas completo)"""
+def escanear_todas_portas(ip, timeout=0.3, max_porta=1024, max_workers=50):
+    """Escaneia TODAS as portas até max_porta (mais lento, mas completo)
+    
+    Args:
+        ip: Endereço IP alvo
+        timeout: Timeout por porta
+        max_porta: Número máximo de portas a escanear
+        max_workers: Número máximo de threads (padrão: 50, 0 = sem limite)
+    """
     portas_abertas = []
+    
+    # Aplica limite de workers (se 0, usa padrão de 50)
+    if max_workers <= 0:
+        max_workers = 50
     
     def testar_porta(porta):
         """Testa uma porta específica"""
@@ -1335,8 +1379,8 @@ def escanear_todas_portas(ip, timeout=0.3, max_porta=1024):
             pass
         return None
     
-    # Escaneia portas em paralelo (até 50 threads para mais velocidade)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+    # Escaneia portas em paralelo (até max_workers threads para mais velocidade)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         resultados = executor.map(testar_porta, range(1, max_porta + 1))
         portas_abertas = [p for p in resultados if p is not None]
     
@@ -1504,7 +1548,7 @@ def main():
     
     for i, (ip, mac) in enumerate(dispositivos_ordenados, 1):
         print(f"  [{i}/{len(dispositivos_ordenados)}] Pingando {ip}...", end="", flush=True)
-        ping = calcular_ping(ip, tentativas=10)
+        ping = calcular_ping(ip, tentativas=10, packet_size=64)
         print(f" {ping}")
         
         dados_tabela.append([ip, mac, ping])

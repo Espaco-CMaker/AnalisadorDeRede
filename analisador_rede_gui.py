@@ -49,6 +49,13 @@ import os
 import re  # para gráfico e processamento
 import webbrowser  # para abrir URLs
 import csv  # para exportação CSV
+import traceback
+import sys
+
+# ============================================================================
+# Versão da Aplicação (Atualize aqui para mudar em todo o programa)
+# ============================================================================
+APP_VERSION = "2.5.6"
 
 # psutil para métricas do sistema
 try:
@@ -80,10 +87,53 @@ try:
 except Exception as exc:  # fallback defensivo
     raise SystemExit(f"Falha ao importar analisador_rede: {exc}")
 
+
+class ToolTip:
+    """Classe para criar tooltips em widgets Tkinter"""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip_window = None
+        self.widget.bind("<Enter>", self.show_tooltip)
+        self.widget.bind("<Leave>", self.hide_tooltip)
+    
+    def show_tooltip(self, event=None):
+        """Mostra o tooltip"""
+        if self.tooltip_window or not self.text:
+            return
+        
+        # Posição do tooltip (abaixo e à direita do widget)
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        
+        # Cria janela de tooltip
+        self.tooltip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)  # Remove decorações da janela
+        tw.wm_geometry(f"+{x}+{y}")
+        
+        # Label com o texto do tooltip
+        label = tk.Label(
+            tw,
+            text=self.text,
+            justify=tk.LEFT,
+            background="#ffffe0",
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=("TkDefaultFont", 9)
+        )
+        label.pack(padx=5, pady=3)
+    
+    def hide_tooltip(self, event=None):
+        """Esconde o tooltip"""
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+
+
 class NetworkAnalyzerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Analisador de Rede")
+        self.root.title(f"Analisador de Rede - v{APP_VERSION}")
         self.root.geometry("1200x600")
         
         # Arquivo de configuração
@@ -101,10 +151,22 @@ class NetworkAnalyzerApp:
         self.table_ips = {}  # {ip: item_id} para rastrear IPs na tabela
         self.device_nicknames = {}  # {mac: "nome personalizado"} - apelidos persistentes
         
+        # Fila de dispositivos para monitoramento (v2.5)
+        self.device_queue = Queue()  # {num, ip, mac} aguardando monitoramento
+        self.device_worker_threads = []  # Lista de worker threads
+        self.device_workers_running = False  # Flag para controlar workers
+        
         # Estado de threads de dispositivos
         self.device_threads = {}  # {ip: thread object}
         self.device_lock = threading.Lock()  # protege acesso ao dicionário
         self.device_services = {}  # {ip: string de serviços detectados}
+        self.active_device_threads = 0  # contador de threads ativas monitorando dispositivos
+        self.active_device_threads_lock = threading.Lock()  # protege contador
+        
+        # Semáforo global para limitar threads paralelas (v2.5+)
+        # Controla ThreadPoolExecutor (ARP, portas) + workers de dispositivos
+        self.max_parallel_threads_config = 0  # Será preenchido do config
+        self.parallel_threads_semaphore = None  # Será criado após carregar config
 
         # Telemetria de threads (CPU per-thread)
         self.thread_cpu_prev = {}  # {tid: total_cpu_time}
@@ -168,10 +230,25 @@ class NetworkAnalyzerApp:
         self.history_hours = tk.IntVar(value=config.get("history_hours", 24))  # horas de histórico persistente
         self.graph_sash_position = config.get("graph_sash_position", 650)  # Posição do divisor do gráfico
         
+        # Limites de recursos (v2.5)
+        self.max_threads = tk.IntVar(value=config.get("max_threads", 20))  # Limite de threads, 0 = sem limite
+        self.max_memory_mb = tk.IntVar(value=config.get("max_memory_mb", 1024))  # Limite de memória em MB, 0 = sem limite
+        # Tamanho do pacote (novo campo)
+        self.packet_size = tk.IntVar(value=config.get("packet_size", 64))  # Tamanho do pacote em bytes
+        self.packet_size_min = 32
+        self.packet_size_max = 1024
+        
+        # Inicializa semáforo global para limitar threads paralelas (v2.5+)
+        max_threads_value = self.max_threads.get()
+        self.parallel_threads_semaphore = threading.Semaphore(max_threads_value if max_threads_value > 0 else 20)
+        
         # Rastreia alterações para salvar
         self.ping_attempts.trace("w", lambda *args: self._save_config())
         self.scan_interval.trace("w", lambda *args: self._save_config())
         self.history_hours.trace("w", lambda *args: self._on_history_hours_change())
+        self.max_threads.trace("w", lambda *args: self._save_config())
+        self.max_memory_mb.trace("w", lambda *args: self._save_config())
+        self.packet_size.trace("w", lambda *args: self._save_config())
 
         # Carrega histórico de ping após ter history_hours configurado
         self._load_ping_history()
@@ -292,105 +369,33 @@ class NetworkAnalyzerApp:
         status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         
         # Labels para métricas do sistema
-        self.lbl_cpu = ttk.Label(status_bar, text="CPU: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_cpu.pack(side=tk.LEFT, padx=5)
+        self.lbl_cpu = ttk.Label(status_bar, text="CPU: --", relief=tk.FLAT)
+        self.lbl_cpu.pack(side=tk.LEFT, padx=5, pady=2)
         
         ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
         
-        self.lbl_memory = ttk.Label(status_bar, text="RAM: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_memory.pack(side=tk.LEFT, padx=5)
+        self.lbl_memory = ttk.Label(status_bar, text="RAM: --", relief=tk.FLAT)
+        self.lbl_memory.pack(side=tk.LEFT, padx=5, pady=2)
         
         ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
         
-        self.lbl_threads = ttk.Label(status_bar, text="Threads: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_threads.pack(side=tk.LEFT, padx=5)
+        self.lbl_threads = ttk.Label(status_bar, text="Threads: --", relief=tk.FLAT)
+        self.lbl_threads.pack(side=tk.LEFT, padx=5, pady=2)
         
         ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
         
-        self.lbl_devices = ttk.Label(status_bar, text="Dispositivos: 0", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_devices.pack(side=tk.LEFT, padx=5)
+        self.lbl_devices = ttk.Label(status_bar, text="Dispositivos: 0", relief=tk.FLAT)
+        self.lbl_devices.pack(side=tk.LEFT, padx=5, pady=2)
         
         ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
         
-        self.lbl_uptime = ttk.Label(status_bar, text="Uptime: 0s", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_uptime.pack(side=tk.LEFT, padx=5)
+        self.lbl_uptime = ttk.Label(status_bar, text="Uptime: 0s", relief=tk.FLAT)
+        self.lbl_uptime.pack(side=tk.LEFT, padx=5, pady=2)
         
         ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
         
-        self.lbl_queue = ttk.Label(status_bar, text="Fila: 0", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_queue.pack(side=tk.LEFT, padx=5)
-        
-        # Inicia atualização periódica da barra de status (a cada 1 segundo)
-        self.root.after(1000, self._update_system_stats)
-        
-        # Barra de status do sistema (altura fixa)
-        status_bar = ttk.Frame(table_frame, relief=tk.SUNKEN, borderwidth=1)
-        status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-        
-        # Labels para métricas do sistema
-        self.lbl_cpu = ttk.Label(status_bar, text="CPU: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_cpu.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_memory = ttk.Label(status_bar, text="RAM: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_memory.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_threads = ttk.Label(status_bar, text="Threads: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_threads.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_devices = ttk.Label(status_bar, text="Dispositivos: 0", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_devices.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_uptime = ttk.Label(status_bar, text="Uptime: 0s", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_uptime.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_queue = ttk.Label(status_bar, text="Fila: 0", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_queue.pack(side=tk.LEFT, padx=5)
-        
-        # Inicia atualização periódica da barra de status (a cada 1 segundo)
-        self.root.after(1000, self._update_system_stats)
-        
-        # Barra de status do sistema (altura fixa)
-        status_bar = ttk.Frame(table_frame, relief=tk.SUNKEN, borderwidth=1)
-        status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-        
-        # Labels para métricas do sistema
-        self.lbl_cpu = ttk.Label(status_bar, text="CPU: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_cpu.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_memory = ttk.Label(status_bar, text="RAM: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_memory.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_threads = ttk.Label(status_bar, text="Threads: --", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_threads.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_devices = ttk.Label(status_bar, text="Dispositivos: 0", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_devices.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_uptime = ttk.Label(status_bar, text="Uptime: 0s", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_uptime.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=3)
-        
-        self.lbl_queue = ttk.Label(status_bar, text="Fila: 0", relief=tk.FLAT, padding=(5, 2))
-        self.lbl_queue.pack(side=tk.LEFT, padx=5)
+        self.lbl_queue = ttk.Label(status_bar, text="Fila: 0", relief=tk.FLAT)
+        self.lbl_queue.pack(side=tk.LEFT, padx=5, pady=2)
         
         # Armazena referências
         self.system_stats_labels = {
@@ -401,6 +406,39 @@ class NetworkAnalyzerApp:
             'uptime': self.lbl_uptime,
             'queue': self.lbl_queue
         }
+        
+        # Adiciona tooltips aos labels da barra de status
+        ToolTip(self.lbl_cpu, 
+                "Uso de CPU da aplicação\n"
+                "Normalizado pelo número de núcleos do processador\n"
+                "Mostra quantos % de um núcleo está sendo usado")
+        
+        ToolTip(self.lbl_memory, 
+                "Uso de memória RAM da aplicação\n"
+                "Mostra memória atual e limite configurado\n"
+                "⚠️ Aparece em vermelho se exceder o limite\n"
+                "Configure o limite em: Configurações > Limites de Recursos")
+        
+        ToolTip(self.lbl_threads, 
+                "Número total de threads ativas da aplicação\n"
+                "Limit scan: limite de threads para operações paralelas\n"
+                "(scan ARP, scan de portas, etc.)\n"
+                "Configure o limite em: Configurações > Limites de Recursos")
+        
+        ToolTip(self.lbl_devices, 
+                "Número de dispositivos detectados na rede\n"
+                "Mostra quantos IPs estão sendo monitorados\n"
+                "Cada dispositivo tem sua própria thread de monitoramento")
+        
+        ToolTip(self.lbl_uptime, 
+                "Tempo que a aplicação está em execução\n"
+                "Mostra há quanto tempo o programa foi iniciado\n"
+                "Formato: horas, minutos e segundos")
+        
+        ToolTip(self.lbl_queue, 
+                "Tamanho da fila de eventos\n"
+                "Mostra quantos eventos estão aguardando processamento\n"
+                "Valores altos podem indicar sistema sobrecarregado")
         
         # Inicia atualização periódica da barra de status (a cada 3 segundos para performance)
         self.app_start_time = time.time()
@@ -545,8 +583,6 @@ class NetworkAnalyzerApp:
         self.tree.tag_configure("online", background="white")  # Sem cor de fundo
         self.tree.tag_configure("offline", background="#BDBDBD")  # Cinza médio
         
-        # Inicia scan automaticamente
-        self.root.after(500, self.start_scan)
 
     def _maybe_show_admin_tip(self):
         try:
@@ -654,22 +690,101 @@ class NetworkAnalyzerApp:
         frame = ttk.Frame(self.tab_config)
         frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        ttk.Label(frame, text="Tentativas de ping por host:").grid(row=0, column=0, sticky="w", pady=5)
-        ttk.Spinbox(frame, from_=1, to=20, textvariable=self.ping_attempts, width=5).grid(row=0, column=1, sticky="w")
+        # Seção: Configurações de Scan
+        lbl_ping = ttk.Label(frame, text="Tentativas de ping por host:")
+        lbl_ping.grid(row=0, column=0, sticky="w", pady=5)
+        spin_ping = ttk.Spinbox(frame, from_=1, to=20, textvariable=self.ping_attempts, width=5)
+        spin_ping.grid(row=0, column=1, sticky="w")
+        ToolTip(lbl_ping, "Número de tentativas de ping para cada dispositivo\n"
+                         "Mais tentativas = resultado mais preciso, mas scan mais lento\n"
+                         "Recomendado: 2-6 tentativas")
 
-        ttk.Label(frame, text="Intervalo entre scans (segundos):").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Spinbox(frame, from_=10, to=900, textvariable=self.scan_interval, width=7).grid(row=1, column=1, sticky="w")
+        # Campo: Tamanho do pacote
+        lbl_packet = ttk.Label(frame, text="Tamanho do pacote (bytes):")
+        lbl_packet.grid(row=1, column=0, sticky="w", pady=5)
+        # Opções fixas para tamanho de pacote
+        packet_options = [32, 64, 128, 512, 1024]
+        self.packet_size_combobox = ttk.Combobox(frame, values=packet_options, textvariable=self.packet_size, width=7, state="readonly")
+        self.packet_size_combobox.grid(row=1, column=1, sticky="w")
+        self.packet_size_combobox.set(self.packet_size.get())
+        def on_packet_size_selected(event):
+            try:
+                value = int(self.packet_size_combobox.get())
+                self.packet_size.set(value)
+                self._save_config()
+            except Exception:
+                pass
+        self.packet_size_combobox.bind("<<ComboboxSelected>>", on_packet_size_selected)
+        # Explicação ao lado do campo
+        lbl_packet_info = ttk.Label(frame, text=(
+            "Opções: 32 (mínimo), 64 (recomendado), 128, 512, 1024 (máximo). "
+            "MTU (Máx. Transmissão) geralmente 1500 bytes. Pacotes grandes podem ser fragmentados ou descartados."
+        ), justify="left", foreground="#444")
+        lbl_packet_info.grid(row=1, column=2, sticky="w", padx=(6,0), pady=0)
+        ToolTip(lbl_packet, f"Tamanho do pacote enviado nos testes de ping.\nMínimo: {self.packet_size_min} bytes, Máximo: {self.packet_size_max} bytes.\nRecomendado: 64-128 bytes.\nMTU (Unidade Máxima de Transmissão) normalmente é 1500 bytes em redes Ethernet. Pacotes maiores podem ser fragmentados ou descartados.")
 
-        ttk.Label(frame, text="Horas de histórico de ping (persistente):").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Spinbox(frame, from_=1, to=168, textvariable=self.history_hours, width=7).grid(row=2, column=1, sticky="w")
+        # Ajusta grid dos próximos campos
+        next_row = 2
 
-        ttk.Label(frame, text="Dicas:").grid(row=3, column=0, sticky="nw", pady=(15,5))
+        lbl_interval = ttk.Label(frame, text="Intervalo entre scans (segundos):")
+        lbl_interval.grid(row=next_row, column=0, sticky="w", pady=5)
+        spin_interval = ttk.Spinbox(frame, from_=10, to=900, textvariable=self.scan_interval, width=7)
+        spin_interval.grid(row=next_row, column=1, sticky="w")
+        ToolTip(lbl_interval, "Tempo de espera entre cada varredura completa da rede\nMaior intervalo = menos tráfego de rede\nRecomendado: 60-300 segundos")
+        next_row += 1
+
+        lbl_history = ttk.Label(frame, text="Horas de histórico de ping (persistente):")
+        lbl_history.grid(row=next_row, column=0, sticky="w", pady=5)
+        spin_history = ttk.Spinbox(frame, from_=1, to=168, textvariable=self.history_hours, width=7)
+        spin_history.grid(row=next_row, column=1, sticky="w")
+        ToolTip(lbl_history, "Quantas horas de histórico de ping manter salvo\nHistórico mais longo = arquivo maior no disco\n24h = 1 dia, 168h = 1 semana")
+        next_row += 1
+
+        # Separador visual
+        ttk.Separator(frame, orient="horizontal").grid(row=next_row, column=0, columnspan=2, sticky="ew", pady=15)
+        next_row += 1
+
+        # Seção: Limites de Recursos (v2.5)
+        ttk.Label(frame, text="Limites de Recursos", font=("TkDefaultFont", 10, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", pady=(5,10))
+        
+        lbl_threads = ttk.Label(frame, text="Limite de threads simultâneas:")
+        lbl_threads.grid(row=5, column=0, sticky="w", pady=5)
+        thread_frame = ttk.Frame(frame)
+        thread_frame.grid(row=5, column=1, sticky="w")
+        spin_threads = ttk.Spinbox(thread_frame, from_=0, to=100, textvariable=self.max_threads, width=7)
+        spin_threads.pack(side=tk.LEFT)
+        ttk.Label(thread_frame, text="  (0 = sem limite)").pack(side=tk.LEFT)
+        ToolTip(lbl_threads, "Limita threads usadas em scans paralelos (ARP, portas)\n"
+                            "Não limita threads de monitoramento de dispositivos\n"
+                            "0 = sem limite (usa padrão otimizado)\n"
+                            "Recomendado: 10-20 para 4-8GB RAM, 40-50 para 16GB+")
+
+        lbl_memory = ttk.Label(frame, text="Limite de memória (MB):")
+        lbl_memory.grid(row=6, column=0, sticky="w", pady=5)
+        memory_frame = ttk.Frame(frame)
+        memory_frame.grid(row=6, column=1, sticky="w")
+        spin_memory = ttk.Spinbox(memory_frame, from_=0, to=8192, increment=256, textvariable=self.max_memory_mb, width=7)
+        spin_memory.pack(side=tk.LEFT)
+        ttk.Label(memory_frame, text="  (0 = sem limite)").pack(side=tk.LEFT)
+        ToolTip(lbl_memory, "Define limite de memória para alerta visual\n"
+                           "Não força parada do programa, apenas avisa\n"
+                           "0 = sem limite (sem aviso)\n"
+                           "Recomendado: 512-1024MB para 4-8GB RAM, 2048-4096MB para 16GB+")
+
+        # Separador visual
+        ttk.Separator(frame, orient="horizontal").grid(row=7, column=0, columnspan=2, sticky="ew", pady=15)
+
+        # Seção: Dicas
+        ttk.Label(frame, text="Dicas:", font=("TkDefaultFont", 10, "bold")).grid(row=8, column=0, sticky="nw", pady=(5,5))
         dicas = (
-            "Use menos tentativas de ping para scans mais rápidos.",
-            "Aumente o intervalo para evitar tráfego excessivo.",
-            "Execute como administrador para melhor descoberta no Windows.",
+            "• Use menos tentativas de ping para scans mais rápidos.",
+            "• Aumente o intervalo para evitar tráfego excessivo.",
+            "• Execute como administrador para melhor descoberta no Windows.",
+            "• Limite de threads padrão (20) é ideal para sistemas com 4-8GB RAM.",
+            "• Defina 0 para sem limites (use com cuidado em sistemas com poucos recursos).",
+            "• Limite de memória ajuda a evitar sobrecarga em sistemas com recursos limitados."
         )
-        ttk.Label(frame, text="\n".join(dicas), justify="left").grid(row=3, column=1, sticky="w")
+        ttk.Label(frame, text="\n".join(dicas), justify="left").grid(row=8, column=1, sticky="w")
 
     def _build_logs_tab(self):
         self.log_text = tk.Text(self.tab_logs, wrap="word", state=tk.DISABLED, height=25)
@@ -818,11 +933,33 @@ class NetworkAnalyzerApp:
                 # Memória da aplicação
                 mem_info = self.process.memory_info()
                 mem_mb = mem_info.rss / 1024 / 1024
-                self.lbl_memory.config(text=f"RAM: {mem_mb:.1f} MB")
+                
+                # Verifica limite de memória (v2.5)
+                max_mem_mb = self.max_memory_mb.get()
+                if max_mem_mb > 0 and mem_mb > max_mem_mb:
+                    # Exibe aviso em vermelho se excedeu o limite
+                    self.lbl_memory.config(text=f"RAM: {mem_mb:.1f}/{max_mem_mb} MB ⚠️", foreground="red")
+                    # Log de aviso (uma vez a cada 30 segundos para não poluir)
+                    current_time = time.time()
+                    if not hasattr(self, '_last_memory_warning') or (current_time - self._last_memory_warning) > 30:
+                        self.log(f"AVISO: Uso de memória ({mem_mb:.1f} MB) excedeu o limite configurado ({max_mem_mb} MB)")
+                        self._last_memory_warning = current_time
+                else:
+                    # Exibe normalmente
+                    if max_mem_mb > 0:
+                        self.lbl_memory.config(text=f"RAM: {mem_mb:.1f}/{max_mem_mb} MB", foreground="black")
+                    else:
+                        self.lbl_memory.config(text=f"RAM: {mem_mb:.1f} MB", foreground="black")
                 
                 # Threads ativas
                 num_threads = self.process.num_threads()
-                self.lbl_threads.config(text=f"Threads: {num_threads}")
+                
+                # Mostra número de threads (sem comparação, pois max_threads é para ThreadPoolExecutor, não total de threads)
+                max_threads = self.max_threads.get()
+                if max_threads > 0:
+                    self.lbl_threads.config(text=f"Threads: {num_threads} (Limit scan: {max_threads})", foreground="black")
+                else:
+                    self.lbl_threads.config(text=f"Threads: {num_threads} (Limit scan: ∞)", foreground="black")
             else:
                 # psutil não disponível
                 thread_count = threading.active_count()
@@ -856,7 +993,11 @@ class NetworkAnalyzerApp:
             pass
         
         # Reagenda atualização a cada 3 segundos (otimiza performance)
-        self.root.after(3000, self._update_system_stats)
+        try:
+            if self.root.winfo_exists():
+                self.root.after(3000, self._update_system_stats)
+        except:
+            pass
     
     def _apply_macs_filter(self):
         """Aplica os filtros na tabela de MACs"""
@@ -999,45 +1140,40 @@ class NetworkAnalyzerApp:
         # Define chave de ordenação
         def sort_key(item):
             val = item.get(col, "")
-            if col == "sel":
-                return 1 if str(val).strip().lower() in ("[x]", "x") else 0
+            # Tenta converter para número se for ping ou num
             if col == "num":
                 try:
                     return int(val)
                 except (ValueError, TypeError):
                     return 0
-            
-            # Para MAC, remove os : e converte
-            if col == "mac":
+            elif col == "ping":
                 try:
-                    return str(val).replace(":", "").upper()
-                except AttributeError:
-                    return ""
+                    # Extrai valor numérico do ping (ex: "5.23 ms (5/5)")
+                    return float(val.split()[0]) if val and val != "Sem resposta" else float('inf')
+                except (ValueError, IndexError, AttributeError):
+                    return float('inf')
+            elif col == "status":
+                return str(val)
+            elif col == "detec":
+                return str(val).lower()
             # Para IP, converte para tupla numérica
-            elif col == "last_ip" or col == "gateway":
-                if val == "-":
-                    return (999, 999, 999, 999) if not sort_reverse else (0, 0, 0, 0)
+            elif col == "ip":
                 try:
                     return tuple(int(x) for x in str(val).split('.'))
                 except (ValueError, AttributeError):
                     return (0, 0, 0, 0)
-            # Para timestamp, tenta converter para datetime
-            elif col == "last_seen":
-                if val == "-":
-                    return "9999-99-99 99:99:99" if not sort_reverse else "0000-00-00 00:00:00"
+            # Para MAC, remove os : e converte
+            elif col == "mac":
                 try:
-                    # Converte DD/MM/YYYY HH:MM:SS para YYYY-MM-DD HH:MM:SS para ordenação
-                    import datetime
-                    dt = datetime.datetime.strptime(str(val), "%d/%m/%Y %H:%M:%S")
-                    return dt.strftime("%Y-%m-%d %H:%M:%S")
-                except (ValueError, AttributeError):
-                    return str(val)
+                    return str(val).replace(":", "").upper()
+                except AttributeError:
+                    return ""
             # Ordenação padrão (texto)
             return str(val).lower()
-        
+
         # Ordena
-        items.sort(key=sort_key, reverse=sort_reverse)
-        
+        items.sort(key=sort_key, reverse=self.sort_reverse)
+
         # Reinsere na tabela mantendo os IDs
         for idx, item in enumerate(items):
             self.tree_macs.move(item["id"], "", idx)
@@ -1277,6 +1413,8 @@ class NetworkAnalyzerApp:
             "history_hours": 24,
             "admin_tip_shown": False,
             "graph_annotations": {},
+            "max_threads": 20,  # v2.5: Limite de threads (0 = sem limite)
+            "max_memory_mb": 1024,  # v2.5: Limite de memória em MB (0 = sem limite)
         }
         try:
             if os.path.exists(self.config_file):
@@ -1298,6 +1436,10 @@ class NetworkAnalyzerApp:
                         config["admin_tip_shown"] = default_config["admin_tip_shown"]
                     if "graph_annotations" not in config:
                         config["graph_annotations"] = default_config["graph_annotations"]
+                    if "max_threads" not in config:
+                        config["max_threads"] = default_config["max_threads"]
+                    if "max_memory_mb" not in config:
+                        config["max_memory_mb"] = default_config["max_memory_mb"]
                     return config
         except Exception as e:
             print(f"Erro ao carregar config: {e}")
@@ -1321,6 +1463,8 @@ class NetworkAnalyzerApp:
                 "graph_sash_position": getattr(self, 'graph_sash_position', 650),
                 "admin_tip_shown": bool(getattr(self, 'admin_tip_shown', False)),
                 "graph_annotations": self.graph_annotations,
+                "max_threads": self.max_threads.get(),  # v2.5
+                "max_memory_mb": self.max_memory_mb.get(),  # v2.5
             }
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
@@ -1491,12 +1635,65 @@ class NetworkAnalyzerApp:
         numeric_mask = ~np.isnan(y_vals)
         timeouts_mask = np.isnan(y_vals)
         
-        self.ax.plot(
-            x_vals, y_vals,
-            color='#2196F3', linewidth=2, marker='o', markersize=5,
-            label='Ping (ms)', markerfacecolor='#2196F3', markeredgecolor='#1976D2',
-            markeredgewidth=1, alpha=0.8
-        )
+        # Sempre agrupa e plota por tamanho de pacote, mostrando todas as linhas históricas presentes na janela visível
+        from collections import defaultdict
+        pings_by_size = defaultdict(list)
+        if hasattr(self, 'ping_history') and ip_addr in self.ping_history:
+            for entry in self.ping_history[ip_addr]:
+                # Sempre interpreta cada valor de tamanho de pacote como uma série independente
+                if isinstance(entry, (list, tuple)) and len(entry) >= 3:
+                    ms, ts, pkt = entry[0], entry[1], entry[2]
+                    pings_by_size[pkt].append((ms, ts))
+                else:
+                    # Se não houver tamanho salvo, trata como uma série separada especial
+                    ms, ts = entry[0], entry[1]
+                    pings_by_size['(desconhecido)'].append((ms, ts))
+        else:
+            # fallback: plota linha única
+            pings_by_size[self.packet_size.get()] = list(zip(y_vals, timestamps))
+
+        # Gera um mapa de cores dinâmico para todos os tamanhos de pacote presentes
+        import itertools
+        base_colors = ['#2196F3', '#4CAF50', '#FF9800', '#9C27B0', '#E91E63', '#009688', '#795548', '#607D8B', '#F44336', '#00BCD4']
+        all_pkt_sizes = list(pings_by_size.keys())
+        color_map = {}
+        for idx, pkt_size in enumerate(sorted([k for k in all_pkt_sizes if isinstance(k, int)]) + [k for k in all_pkt_sizes if not isinstance(k, int)]):
+            color_map[pkt_size] = base_colors[idx % len(base_colors)]
+
+        current_pkt_size = self.packet_size.get() if hasattr(self, 'packet_size') else None
+        # O eixo X global da janela visível é sempre a lista de timestamps visíveis
+        all_timestamps = list(timestamps)
+        ts_idx_map = {ts: i for i, ts in enumerate(all_timestamps)}
+
+        plotted_labels = set()
+        for pkt_size in color_map:
+            entries = pings_by_size[pkt_size]
+            # Para cada timestamp visível, pega o valor correspondente se existir
+            ms_by_ts = {ts: ms for ms, ts in entries}
+            y_vals_pkt = [ms_by_ts.get(ts, np.nan) for ts in all_timestamps]
+            if not any(np.isfinite(y) for y in y_vals_pkt):
+                continue
+            x_vals_pkt = np.arange(len(all_timestamps))
+            color = color_map[pkt_size]
+            if pkt_size == current_pkt_size:
+                label = f'● Ping {pkt_size} bytes (atual)'
+            elif isinstance(pkt_size, int):
+                label = f'Ping {pkt_size} bytes'
+            else:
+                label = f'Ping {pkt_size}'
+            self.ax.plot(
+                x_vals_pkt, y_vals_pkt,
+                color=color, linewidth=2, marker='o', markersize=5,
+                label=label if label not in plotted_labels else None, markerfacecolor=color, markeredgecolor=color,
+                markeredgewidth=1, alpha=0.8
+            )
+            plotted_labels.add(label)
+        # Ajusta labels do eixo X para mostrar datas/hora se houver espaço
+        if len(all_timestamps) > 1:
+            step = max(1, len(all_timestamps) // 10)
+            self.ax.set_xticks(np.arange(0, len(all_timestamps), step))
+            self.ax.set_xticklabels([all_timestamps[i] for i in range(0, len(all_timestamps), step)], rotation=30, fontsize=8)
+        self.ax.legend(loc='upper right', fontsize=9)
         
         # Marca timeouts
         timeout_count = int(np.sum(timeouts_mask))
@@ -2298,8 +2495,9 @@ class NetworkAnalyzerApp:
         # Linha de média
         if has_numeric:
             avg_ping = float(np.nanmean(y_vals))
-            self.ax.axhline(y=avg_ping, color='#FFC107', linestyle=':', linewidth=2, 
-                           label=f'Média: {int(avg_ping)}ms', alpha=0.7)
+            if not np.isnan(avg_ping):
+                self.ax.axhline(y=avg_ping, color='#FFC107', linestyle=':', linewidth=2, 
+                               label=f'Média: {int(avg_ping)}ms', alpha=0.7)
         else:
             avg_ping = float('nan')
         
@@ -2372,29 +2570,19 @@ class NetworkAnalyzerApp:
         pings = [d[0] if isinstance(d, tuple) else d for d in dados]
         # Remove timeouts (None) para não distorcer o sparkline
         pings = [p for p in pings if p is not None]
-        if not pings:
-            return "timeouts"
+        if not pings:  # Se só tem timeouts
+            return "●○○○○ (Timeouts)"
         
-        # Normaliza os valores para escala de 0-8 (altura dos caracteres)
-        max_ping = max(pings)
-        min_ping = min(pings)
-        span = max_ping - min_ping if max_ping > min_ping else 1
+        avg = sum(pings) / len(pings)
         
-        # Caracteres em escala de altura (pixels)
-        chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-        
-        result = ""
-        for ping in pings:
-            normalized = (ping - min_ping) / span
-            idx = int(normalized * (len(chars) - 1))
-            idx = max(0, min(idx, len(chars) - 1))
-            result += chars[idx]
-        
-        # Adiciona a leitura atual no final
-        current_ping = pings[-1]
-        result += f" {int(current_ping)}ms"
-        
-        return result
+        if avg < 20:
+            return "●●●●● (Excelente)"  # verde
+        elif avg < 50:
+            return "●●●●○ (Bom)"  # amarelo
+        elif avg < 100:
+            return "●●●○○ (Ok)"  # laranja
+        else:
+            return "●●○○○ (Lento)"  # vermelho
 
     # ------------------------------------------------------------------
     # Logging e status
@@ -2489,173 +2677,248 @@ class NetworkAnalyzerApp:
     # ------------------------------------------------------------------
     # Scans
     def start_scan(self):
+        self.log("[DEBUG] Botão Iniciar pressionado.")
         if self.scan_thread and self.scan_thread.is_alive():
+            self.log("[DEBUG] Scan já está em execução. Ignorando novo pedido.")
             return
         self.stop_event.clear()
-        # Inicia apenas um scan (ARP + threads)
-        self.scan_thread = threading.Thread(target=self._do_scan, daemon=True, name="Scanner-ARP")
-        self.scan_thread.start()
-        self.btn_start.configure(state=tk.DISABLED)
-        self.btn_stop.configure(state=tk.NORMAL)
-        self.set_status("Iniciando monitoramento...")
-        self.log("Monitoramento iniciado - dispositivos serão atualizados continuamente")
+        try:
+            # Inicia worker threads para monitoramento (v2.5)
+            if not self.device_workers_running:
+                max_threads = self.max_threads.get()
+                num_workers = max_threads if max_threads > 0 else 10
+                self.log(f"[DEBUG] Iniciando {num_workers} device workers.")
+                self._start_device_workers(num_workers)
+            # Inicia apenas um scan (ARP + coloca dispositivos na fila)
+            self.log("[DEBUG] Iniciando thread de scan ARP.")
+            self.scan_thread = threading.Thread(target=self._do_scan, daemon=True, name="Scanner-ARP")
+            self.scan_thread.start()
+            # Proteção contra widget destruído
+            try:
+                if self.btn_start.winfo_exists():
+                    self.btn_start.configure(state=tk.DISABLED)
+                    self.btn_stop.configure(state=tk.NORMAL)
+            except Exception as e:
+                self.log(f"[ERRO] Erro ao atualizar estado dos botões: {e}")
+            self.set_status("Iniciando monitoramento...")
+            self.log("Monitoramento iniciado - dispositivos serão atualizados continuamente")
+        except Exception as exc:
+            self.set_status(f"Erro ao iniciar: {exc}")
+            self.log(f"[ERRO] Falha ao iniciar monitoramento: {exc}")
 
     def stop_scan(self):
         self.stop_event.set()
+        self.device_workers_running = False
+        
+        # Limpa a fila
+        while not self.device_queue.empty():
+            try:
+                self.device_queue.get_nowait()
+            except:
+                break
+        
         # Aguarda threads terminarem
         with self.device_lock:
             self.device_threads.clear()
-        self.btn_start.configure(state=tk.NORMAL)
-        self.btn_stop.configure(state=tk.DISABLED)
+        
+        # Proteção contra widget destruído
+        try:
+            if self.btn_start.winfo_exists():
+                self.btn_start.configure(state=tk.NORMAL)
+                self.btn_stop.configure(state=tk.DISABLED)
+        except:
+            pass
+        
         self.set_status("Parado")
         self.log("Monitoramento parado")
 
     def _do_scan(self):
         """Realiza varredura ARP e lança threads por dispositivo"""
         try:
-            self.log("Obtendo interface ativa...")
+            self.log("[DEBUG] Obtendo interface ativa...")
             ip, mask = obter_interface_ativa()
             if not ip:
-                self.log("Nenhuma interface ativa encontrada")
+                self.set_status("Nenhuma interface ativa encontrada")
+                self.log("[ERRO] Nenhuma interface ativa encontrada")
                 return
-            self.log(f"Interface: {ip} / {mask}")
+            self.log(f"[DEBUG] Interface: {ip} / {mask}")
 
             # Calcula identificador único da rede/gateway
             self.current_gateway = self._discover_gateway_identifier(ip, mask)
-            self.log(f"Gateway identificado: {self.current_gateway}")
+            self.log(f"[DEBUG] Gateway identificado: {self.current_gateway}")
 
-            self.log("Executando ARP scan...")
-            dispositivos = fazer_arp_scan(ip, mask)
+            self.log("[DEBUG] Executando ARP scan...")
+            arp_workers = 2
+            dispositivos = fazer_arp_scan(ip, mask, max_workers=arp_workers)
             if not dispositivos:
-                self.log("Nenhum dispositivo encontrado no ARP")
+                self.set_status("Nenhum dispositivo encontrado no ARP")
+                self.log("[ERRO] Nenhum dispositivo encontrado no ARP")
                 return
 
             total = len(dispositivos)
             self.set_status(f"Descobertos {total} dispositivos, iniciando monitoramento...")
-            self.log(f"ARP scan encontrou {total} dispositivos")
-            
+            self.log(f"[DEBUG] ARP scan encontrou {total} dispositivos")
             # Log de debug: lista todos os IPs encontrados
             for ip_found in sorted(dispositivos.keys(), key=lambda x: [int(p) for p in x.split('.')]):
                 self.log(f"  → Dispositivo encontrado: {ip_found} ({dispositivos[ip_found]})")
-            
-            # Lança uma thread por dispositivo (monitoramento paralelo)
-            # OTIMIZAÇÃO: Adiciona delay entre threads para evitar spike de CPU
+            # Enfileira dispositivos para monitoramento (v2.5)
             idx = 0
             for ip_addr, mac in sorted(dispositivos.items(), key=lambda x: [int(p) for p in x[0].split('.')]):
                 idx += 1
-                
-                # Verifica se já existe thread deste IP
-                with self.device_lock:
-                    if ip_addr not in self.device_threads:
-                        # Cria nova thread para monitorar este dispositivo
-                        thread = threading.Thread(
-                            target=self._monitor_device,
-                            args=(idx, ip_addr, mac),
-                            daemon=True,
-                            name=f"Device-{ip_addr}"
-                        )
-                        self.device_threads[ip_addr] = thread
-                        thread.start()
-                        self.log(f"  → Thread iniciada para {ip_addr}")
-                        # Delay de 200ms entre cada thread para evitar spike de CPU
-                        time.sleep(0.2)
-                    else:
-                        self.log(f"  → Thread já existe para {ip_addr}, reutilizando")
-            
+                self.device_queue.put({
+                    "num": idx,
+                    "ip": ip_addr,
+                    "mac": mac
+                })
+                self.log(f"  → Dispositivo enfileirado para monitoramento: {ip_addr}")
             self.set_status(f"Monitorando {total} dispositivos")
-            # Salva rastreamento após scan inicial
             self._save_nicknames()
         except Exception as exc:
-            self.log(f"Erro no scan: {exc}")
+            self.set_status(f"Erro no scan: {exc}")
+            self.log(f"[ERRO] Erro no scan: {exc}")
 
     def _monitor_device(self, num, ip_addr, mac):
-        """Thread contínua para monitorar um único dispositivo"""
-        self.log(f"[{ip_addr}] Thread de monitoramento iniciada")
-        tentativas = max(1, self.ping_attempts.get())
+        """Monitora um único dispositivo (chamado por device_worker)"""
         
-        # Inicializa histórico se necessário
-        with self.ping_history_lock:
-            if ip_addr not in self.ping_history:
-                self.ping_history[ip_addr] = []
-        
-        # Primeiro, coleta informações gerais (uma vez)
-        self.log(f"[{ip_addr}] Coletando informações do dispositivo...")
-        hostname, fabricante = obter_info_dispositivo(ip_addr, mac)
-        netbios = obter_netbios(ip_addr)
-        
-        # Escaneia portas em background (custo controlado)
-        servicos = self.device_services.get(ip_addr, "Escaneando portas...")
-        if ip_addr not in self.device_services:
-            self.device_services[ip_addr] = servicos
-            threading.Thread(
-                target=self._scan_ports_async,
-                args=(ip_addr,),
-                daemon=True,
-                name=f"Ports-{ip_addr}"
-            ).start()
-        
-        # Loop contínuo de ping enquanto o dispositivo está ativo
-        self.log(f"[{ip_addr}] Iniciando loop de monitoramento contínuo...")
-        while not self.stop_event.is_set():
-            try:
-                # Realiza ping
-                ping = calcular_ping(ip_addr, tentativas=tentativas)
-                
-                # Extrai valor numérico e armazena no histórico com timestamp
-                ms_valor = self._extrair_ms_do_ping(ping)
-                # OTIMIZAÇÃO: Remover verificação ARP/TCP (muito pesada)
-                status_bool = (ms_valor is not None)
-                status_icon = "ONLINE" if status_bool else "OFFLINE"
-                metodo = "Ping"
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                # Registra tanto sucesso quanto timeout no histórico
-                with self.ping_history_lock:
-                    self.ping_history.setdefault(ip_addr, []).append((ms_valor if ms_valor is not None else None, timestamp))
-                # OTIMIZAÇÃO: Prune e save apenas a cada 30 segundos (não a cada ping!)
-                self._save_ping_history_throttled(interval_seconds=60)
-                
-                # Gera gráfico com histórico
-                historico = self._gerar_grafico_ping(ip_addr)
-                grafico = self._gerar_micrografico(ip_addr)
-                
-                # Atualiza serviços com último valor conhecido
-                servicos = self.device_services.get(ip_addr, servicos)
+        try:
+            self.log(f"[{ip_addr}] Thread de monitoramento iniciada (ativas: {self.active_device_threads})")
+            tentativas = max(1, self.ping_attempts.get())
+            
+            # Inicializa histórico se necessário
+            with self.ping_history_lock:
+                if ip_addr not in self.ping_history:
+                    self.ping_history[ip_addr] = []
+            
+            # Primeiro, coleta informações gerais (uma vez)
+            self.log(f"[{ip_addr}] Coletando informações do dispositivo...")
+            hostname, fabricante = obter_info_dispositivo(ip_addr, mac)
+            netbios = obter_netbios(ip_addr)
+            
+            # Escaneia portas NO WORKER (não cria thread extra)
+            servicos = self.device_services.get(ip_addr, "Escaneando portas...")
+            if ip_addr not in self.device_services:
+                self.device_services[ip_addr] = servicos
+                # Executa port scan de forma síncrona dentro do worker
+                try:
+                    # CRÍTICO: Reduce a 1-2 workers para não exceder limite global
+                    # O port scan já reduz a velocidade naturalmente
+                    max_workers = 1
+                    servicos = escanear_portas(ip_addr, timeout=0.6, max_workers=max_workers)
+                    if not servicos:
+                        servicos = "Nenhuma porta aberta"
+                except Exception as exc:
+                    servicos = f"Erro portas: {exc}" if str(exc) else "Falha ao escanear"
+                self.device_services[ip_addr] = servicos
+                self.queue.put(("services", (ip_addr, servicos)))
+            
+            # Loop contínuo de ping enquanto o dispositivo está ativo
+            self.log(f"[{ip_addr}] Iniciando loop de monitoramento contínuo...")
+            while not self.stop_event.is_set():
+                try:
+                    # Realiza ping
+                    packet_size = self.packet_size.get()
+                    ping = calcular_ping(ip_addr, tentativas=tentativas, packet_size=packet_size)
+                    # Extrai valor numérico e armazena no histórico com timestamp e tamanho do pacote
+                    ms_valor = self._extrair_ms_do_ping(ping)
+                    status_bool = (ms_valor is not None)
+                    status_icon = "ONLINE" if status_bool else "OFFLINE"
+                    metodo = "Ping"
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    with self.ping_history_lock:
+                        self.ping_history.setdefault(ip_addr, []).append((ms_valor if ms_valor is not None else None, timestamp, packet_size))
+                    self._save_ping_history_throttled(interval_seconds=60)
+                    historico = self._gerar_grafico_ping(ip_addr)
+                    grafico = self._gerar_micrografico(ip_addr)
+                    # Atualiza serviços com último valor conhecido
+                    servicos = self.device_services.get(ip_addr, servicos)
 
-                # Prepara item para a tabela
-                item = {
-                    "num": num,
-                    "ip": ip_addr,
-                    "hostname": hostname,
-                    "netbios": netbios,
-                    "fabricante": fabricante,
-                    "servicos": servicos,
-                    "ping": ping,
-                    "grafico": grafico,
-                    "historico": historico,
-                    "mac": mac,
-                    "status": status_icon,
-                    "detec": metodo or "",
-                }
-                
-                # OTIMIZAÇÃO: Remover logging de cada ping (gera muito I/O)
-                
-                # Atualiza tabela em tempo real
-                self.queue.put(("table_item", item))
-                
-                # Aguarda antes do próximo ping (15 segundos para reduzir carga)
-                for _ in range(15):
-                    if self.stop_event.is_set():
-                        break
-                    time.sleep(1)
+                    # Prepara item para a tabela
+                    item = {
+                        "num": num,
+                        "ip": ip_addr,
+                        "hostname": hostname,
+                        "netbios": netbios,
+                        "fabricante": fabricante,
+                        "servicos": servicos,
+                        "ping": ping,
+                        "grafico": grafico,
+                        "historico": historico,
+                        "mac": mac,
+                        "status": status_icon,
+                        "detec": metodo or "",
+                    }
                     
-            except Exception as e:
-                self.log(f"Erro monitorando {ip_addr}: {e}")
-                time.sleep(5)
+                    # OTIMIZAÇÃO: Remover logging de cada ping (gera muito I/O)
+                    
+                    # Atualiza tabela em tempo real
+                    self.queue.put(("table_item", item))
+                    
+                    # Aguarda antes do próximo ping (15 segundos para reduzir carga)
+                    for _ in range(15):
+                        if self.stop_event.is_set():
+                            break
+                        time.sleep(1)
+                
+                except Exception as e:
+                    self.log(f"Erro monitorando {ip_addr}: {e}")
+                    time.sleep(5)
+        
+        except Exception as e:
+            self.log(f"Erro na thread de monitoramento {ip_addr}: {e}")
+
+    def _start_device_workers(self, num_workers):
+        """Inicia um pool de worker threads para monitorar dispositivos (v2.5)"""
+        if self.device_workers_running:
+            return
+        
+        self.device_workers_running = True
+        self.device_worker_threads = []
+        
+        for i in range(num_workers):
+            worker = threading.Thread(
+                target=self._device_worker,
+                daemon=True,
+                name=f"DeviceWorker-{i+1}"
+            )
+            self.device_worker_threads.append(worker)
+            worker.start()
+            self.log(f"Worker {i+1}/{num_workers} iniciado")
+    
+    def _device_worker(self):
+        """Worker que processa dispositivos da fila continuamente"""
+        with self.active_device_threads_lock:
+            self.active_device_threads += 1
+        
+        try:
+            while self.device_workers_running and not self.stop_event.is_set():
+                try:
+                    # Pega dispositivo da fila (timeout de 1s para permitir parada graceful)
+                    device_info = self.device_queue.get(timeout=1)
+                    
+                    num = device_info["num"]
+                    ip_addr = device_info["ip"]
+                    mac = device_info["mac"]
+                    
+                    self.log(f"[Worker] Processando {ip_addr}...")
+                    
+                    # Monitora o dispositivo
+                    self._monitor_device(num, ip_addr, mac)
+                    
+                except Empty:
+                    # Timeout esperado, continua aguardando
+                    continue
+                except Exception as e:
+                    self.log(f"Erro no worker: {e}")
+        finally:
+            with self.active_device_threads_lock:
+                self.active_device_threads -= 1
 
     def _scan_ports_async(self, ip_addr: str):
         """Escaneia portas em background e atualiza a tabela"""
         try:
-            servicos = escanear_portas(ip_addr, timeout=0.6)
+            # Obtém limite de threads das configurações (0 = sem limite)
+            max_workers = self.max_threads.get()
+            servicos = escanear_portas(ip_addr, timeout=0.6, max_workers=max_workers)
             if not servicos:
                 servicos = "Nenhuma porta aberta"
         except Exception as exc:
@@ -2697,14 +2960,28 @@ class NetworkAnalyzerApp:
                 processed += 1
         except Empty:
             pass
+        except Exception as e:
+            # Ignora erros de widget destruído
+            if "invalid command name" not in str(e):
+                print(f"[ERRO] Erro ao processar fila: {e}")
+        
         # Reagenda com intervalo maior (600ms para performance agressiva)
-        self.root.after(600, self._process_queue)
+        try:
+            if self.root.winfo_exists():
+                self.root.after(600, self._process_queue)
+        except:
+            pass
 
     def _append_log(self, text: str):
-        self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, text)
-        self.log_text.see(tk.END)
-        self.log_text.configure(state=tk.DISABLED)
+        try:
+            if not self.log_text.winfo_exists():
+                return
+            self.log_text.configure(state=tk.NORMAL)
+            self.log_text.insert(tk.END, text)
+            self.log_text.see(tk.END)
+            self.log_text.configure(state=tk.DISABLED)
+        except:
+            pass
 
     # ------------------------------------------------------------------
     # Threads tab helpers
@@ -2807,10 +3084,18 @@ class NetworkAnalyzerApp:
             self.thread_status_lbl.config(text=f"Threads ativas: {len(items)} | Intervalo amostra: {int(interval*1000)} ms")
         except Exception as exc:
             if hasattr(self, "thread_status_lbl"):
-                self.thread_status_lbl.config(text=f"Erro ao coletar threads: {exc}")
+                try:
+                    if self.thread_status_lbl.winfo_exists():
+                        self.thread_status_lbl.config(text=f"Erro ao coletar threads: {exc}")
+                except:
+                    pass
 
         # Agenda próxima atualização
-        self.root.after(2000, self._update_threads_tab)
+        try:
+            if self.root.winfo_exists():
+                self.root.after(2000, self._update_threads_tab)
+        except:
+            pass
 
     def _clear_table(self):
         """Limpa todos os itens da tabela"""
@@ -2834,6 +3119,8 @@ class NetworkAnalyzerApp:
     def _update_services(self, ip_addr: str, servicos: str):
         """Atualiza a coluna de serviços para o IP informado"""
         try:
+            if not self.tree.winfo_exists():
+                return
             self.device_services[ip_addr] = servicos
             item_id = self.table_ips.get(ip_addr)
             if not item_id:
@@ -2953,10 +3240,10 @@ class NetworkAnalyzerApp:
                 item["hostname"],
                 item["netbios"],
                 item["fabricante"],
-                item["servicos"],
+                item.get("servicos", ""),
                 item["ping"],
-                item["grafico"],
-                item["historico"],
+                item.get("grafico", ""),
+                item.get("historico", ""),
                 item.get("detec", "")
             ), tags=("updating", "online" if item.get("status") == "ONLINE" else "offline"))
             
@@ -2969,7 +3256,7 @@ class NetworkAnalyzerApp:
         # Ajusta larguras após inserir/atualizar
         self._auto_resize_columns()
 
-        # Mantém ordenação padrão (ID -> IP) sempre que a tabela é alterada
+        # Mantém ordenação padrão (ID numérico e IP) sempre que a tabela é alterada
         self._apply_default_table_order()
 
     def _sort_table(self, col):
@@ -3117,26 +3404,31 @@ class NetworkAnalyzerApp:
 
     def _update_table(self, items):
         """Substitui a tabela inteira (mantido para compatibilidade)"""
-        self.tree.delete(*self.tree.get_children())
-        for item in items:
-            self.tree.insert("", tk.END, values=(
-                item["num"],
-                item.get("status", ""),
-                item["ip"],
-                item["mac"],
-                item.get("nome", ""),
-                item["hostname"],
-                item["netbios"],
-                item["fabricante"],
-                item.get("servicos", ""),
-                item["ping"],
-                item.get("grafico", ""),
-                item.get("historico", ""),
-                item.get("detec", "")
-            ))
+        try:
+            if not self.tree.winfo_exists():
+                return
+            self.tree.delete(*self.tree.get_children())
+            for item in items:
+                self.tree.insert("", tk.END, values=(
+                    item["num"],
+                    item.get("status", ""),
+                    item["ip"],
+                    item["mac"],
+                    item.get("nome", ""),
+                    item["hostname"],
+                    item["netbios"],
+                    item["fabricante"],
+                    item.get("servicos", ""),
+                    item["ping"],
+                    item.get("grafico", ""),
+                    item.get("historico", ""),
+                    item.get("detec", "")
+                ))
 
             # Reaplica ordenação padrão após carga
             self._apply_default_table_order()
+        except Exception:
+            pass
 
 
 def main():

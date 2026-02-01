@@ -16,13 +16,21 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+import re
+with open('analisador_rede_gui.py', encoding='utf-8') as f:
+    content = f.read()
+match = re.search(r'APP_VERSION\s*=\s*[\"\\\']([\d\.]+)[\"\\\']', content)
+if match:
+    version = match.group(1)
+else:
+    version = '0.0'
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.datas,
     [],
-    name='AnalisadorDeRede',
+    name=f'AnalisadorDeRede_v{version}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
